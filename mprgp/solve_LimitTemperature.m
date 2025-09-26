@@ -40,6 +40,7 @@ opts.precond = 'none';    % 'none', 'jacobi', or 'ichol'
 opts.epsr = 1e-8;
 opts.maxit = 500;
 opts.Gamma = 1.0;
+opts.verbose = true;
 [u, info] = mprgp_solver(A, b, c, opts);
 x = u;
 

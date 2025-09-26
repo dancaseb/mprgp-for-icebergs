@@ -4,6 +4,7 @@
 ElmerSolver case.sif
 
 cd mprgp
+
 # Step 1: Extract data from ParaView
 pvpython ./save_paraview_data.py
 

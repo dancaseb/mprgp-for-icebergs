@@ -1,16 +1,20 @@
+% TODO's
+% look at the code and identify costly operations
+% implement logic for an upper bound
+
 function [u, info] = mprgp_solver(A, b, c, opts)
     % MPRGP_SOLVER  Solve bound-constrained QP  min 1/2 x' A x - b' x  s.t. x >= c
     % Implements MPRGP (Modified Proportioning with Reduced Gradient Projection).
     %
     % Usage:
-    %   opts.precond = 'none' | 'jacobi' | 'ichol'   (default 'jacobi')
+    %   opts.precond = 'none' | 'jacobi'
     %   opts.epsr = 1e-8
     %   opts.maxit = 1e5
     %   opts.Gamma = 1.0
     %   opts.verbose = true/false
     %
     % Returns:
-    %   u    - solution vector (feasible: u >= c)
+    %   u    - solution vector
     %   info - struct with fields: ncg, ne, np, iters, converged, final_norm_gp, runtime
     %
     % NOTES / COST remarks (inline):
@@ -27,8 +31,6 @@ function [u, info] = mprgp_solver(A, b, c, opts)
     %  - Use normest(A) to estimate ||A|| instead of full dense norm
     %  - Robust computation of feasible step alpha_f
     %  - Safe guards for divide-by-zero in CG steps
-    %
-    % References: MPRGP algorithm (see provided PDF/chapter) and face preconditioning.
 
     t0_all = tic();
 
@@ -41,21 +43,22 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
     if ~isfield(opts, 'verbose'), opts.verbose = true; end
     if ~isfield(opts, 'adapt'), opts.adapt = false; end
+    
 
-    % Ensure column vectors
+    % column vectors
     b = b(:);
     c = c(:);
 
-    % Initial feasible point: projection of zero onto bounds
+    % Initial feasible point: start at the bounds
     % u = max(zeros(n, 1), c);
-    u = c;  % Start at the lower bound
+    u = c;
 
-    % Estimate matrix norm (COST: normest is cheap-ish, avoids full -> dense)
-    lAl = normest(A); % estimate of ||A||_2
+    lAl = normest(A); % estimate of ||A||_2, cheaper than full norm
     if lAl == 0, lAl = 1; end
     alpha = 1 / lAl; % recommended expansion step size
 
-    % Prepare preconditioner (one-time cost)
+
+    % preconditining logic
     precond_type = lower(opts.precond);
 
     switch precond_type
@@ -69,58 +72,54 @@ function [u, info] = mprgp_solver(A, b, c, opts)
             precond_apply = @(g, J) ((g ./ D) .* J); % z = (diag(A)^{-1} g) on free set
             if opts.verbose, disp('Preconditioner: Jacobi (diagonal)'); end
 
-        % case 'ichol'
-        %     % Try incomplete Cholesky; fall back to Jacobi if it fails
-        %     try
-        %         % COST: ichol factorization is one-time and can be expensive for big A.
-        %         % Tweak options if needed (drop tolerance, diagonal compensation)
-        %         % Note: ichol expects symmetric positive definite-ish A
-        %         opts_ichol.type = 'ict';
-        %         opts_ichol.droptol = 1e-3; % tweakable
-        %         L = ichol(A, opts_ichol); % COSTLY: one-time factorization (sparse)
-        %         precond_apply = @(g, J) ((L' \ (L \ g)) .* J); % z = M^{-1} g on free set
-        %         if opts.verbose, disp('Preconditioner: ICHOL (succeeded)'); end
-        %     catch ME
-        %         warning('ichol failed (%s). Falling back to Jacobi preconditioner.', ME.message);
-        %         D = diag(A); D(abs(D) < eps) = 1;
-        %         precond_apply = @(g, J) ((g ./ D) .* J);
-        %         if opts.verbose, disp('Preconditioner: Jacobi (fallback)'); end
-        %     end
+            % case 'ichol'
+            %     % Try incomplete Cholesky; fall back to Jacobi if it fails
+            %     try
+            %         % COST: ichol factorization is one-time and can be expensive for big A.
+            %         % Tweak options if needed (drop tolerance, diagonal compensation)
+            %         % Note: ichol expects symmetric positive definite-ish A
+            %         opts_ichol.type = 'ict';
+            %         opts_ichol.droptol = 1e-3; % tweakable
+            %         L = ichol(A, opts_ichol); % COSTLY: one-time factorization (sparse)
+            %         precond_apply = @(g, J) ((L' \ (L \ g)) .* J); % z = M^{-1} g on free set
+            %         if opts.verbose, disp('Preconditioner: ICHOL (succeeded)'); end
+            %     catch ME
+            %         warning('ichol failed (%s). Falling back to Jacobi preconditioner.', ME.message);
+            %         D = diag(A); D(abs(D) < eps) = 1;
+            %         precond_apply = @(g, J) ((g ./ D) .* J);
+            %         if opts.verbose, disp('Preconditioner: Jacobi (fallback)'); end
+            %     end
 
         otherwise
             error('Unknown preconditioner: %s', opts.precond);
     end
 
-    % Initial gradient and projected quantities
-    g = A * u - b; % gradient (COST: one matvec if u not zero; here A*u cheap for initial u)
+    % initialization
+    g = A * u - b; % gradient (Cost: matvec operation)
     J = (u > c); % logical free-set indicator
-    gf = J .* g; % free gradient (O(n))
-    gc = min((~J) .* g, 0); % chopped gradient (O(n))
-
-    % gr = min(lAl * (J .* (u - c)), gf); % reduced free gradient (O(n)), phi tilde in paper
-    gr = compute_reduced_gradient(gf, J, u, c, lAl, n);
-
+    gf = J .* g; % free gradient
+    gc = min((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
+    gr = min(lAl * (J .* (u - c)), gf); % reduced free gradient (O(n)), phi tilde in paper
     gp = gf + gc; % projected gradient
+    disp('gf, gc, gp norms:'); disp([norm(gf), norm(gc), norm(gp)]);
 
-    % Preconditioned residual and CG direction
-    z = precond_apply(g, J); % preconditioner apply (cost depends on type)
-    p = z;
+    z = precond_apply(g, J);
+    p = z; % search direction
 
     % counters & info
     ncg = 0; ne = 0; np = 0;
     iters = 0;
     converged = false;
 
-    % Main MPRGP loop
+    % main MPRGP loop
     while norm(gp) > opts.epsr && iters < opts.maxit
+        disp(norm(gp));
         iters = iters + 1;
 
-        % Strict proportionality test (COST: dot prods O(n))
         if (gc' * gc) <= (opts.Gamma^2) * (gr' * gf)
-            % Proportional branch: trial preconditioned CG step
-            Ap = A * p; % COSTLY: matrix-vector product (dominant per-iteration cost)
-            rtp = z' * g; % preconditioned inner product (O(n))
-            pAp = p' * Ap; % inner product (O(n))
+            Ap = A * p; % Cost: matvec operation
+            rtp = z' * g;
+            pAp = p' * Ap;
 
             if abs(pAp) < eps
                 % direction degenerate; break to avoid division by zero
@@ -128,34 +127,30 @@ function [u, info] = mprgp_solver(A, b, c, opts)
                 break;
             end
 
-            acg = rtp / pAp;
-            yy = u - acg * p;
+            acg = rtp / pAp; % CG step size
+            yy = u - acg * p; % full CG step (not necessarily feasible)
 
             if all(yy >= c)
                 % Full CG step accepted
-                u = yy; % O(n)
-                g = g - acg * Ap; % O(n)
-                % Update preconditioned residual and direction
+                u = yy;
+                g = g - acg * Ap; % update gradient
                 J = (u > c);
-                z = precond_apply(g, J); % preconditioner apply (COST depends on type)
-                % Beta update uses z (preconditioned residual)
-                beta = (z' * Ap) / pAp; % O(n)
-                p = z - beta * p; % O(n)
-                % Update gradients
-                gf = J .* g; gc = min((~J) .* g, 0); 
-
-                % gr = min(lAl * (J .* (u - c)), gf);
-                gr = compute_reduced_gradient(gf, J, u, c, lAl, n);
-                
+                z = precond_apply(g, J);
+                beta = (z' * Ap) / pAp;
+                p = z - beta * p;
+                % update gradients
+                gf = J .* g;
+                gc = min((~J) .* g, 0);
+                gr = min(lAl * (J .* (u - c)), gf);
                 gp = gf + gc;
                 ncg = ncg + 1;
             else
-                % Partial (feasible) CG step -> compute feasible step alpha_f robustly
+                % expansion step -> compute feasible step alpha_f robustly
                 pos = (p > 0) & J; % only indices where p would decrease u towards bound (positive p)
 
                 if any(pos)
                     a_vals = (u(pos) - c(pos)) ./ p(pos);
-                    a = min(a_vals);
+                    a = min(a_vals); % a_f in paper
                     if ~isfinite(a) || a < 0, a = 0; end
                 else
                     a = 0;
@@ -168,29 +163,29 @@ function [u, info] = mprgp_solver(A, b, c, opts)
                 z = precond_apply(g, J);
                 % Expansion step: projection along -alpha*gf (expansion/projection move)
                 % Use gf as J.*g
-                % adaptive step size 
+                % adaptive step size
                 if opts.adapt
                     alpha = (gr' * g) / (gr' * (A * gr));
 
                     if alpha <= 0 || alpha > 1 / lAl
                         alpha = 1 / lAl;
                     end
-                    %  TODO should lAl be updated here?
-
                 end
 
-                u = max(u - alpha * (J .* g), c); % COST: O(n)
+                u = max(u - alpha * (J .* g), c);
                 J = (u > c);
-                g = A * u - b; % full matvec to refresh gradient (COSTLY)
+                g = A * u - b; % Cost (matvec)
                 z = precond_apply(g, J);
                 p = z;
-                gf = J .* g; gc = min((~J) .* g, 0); gr = min(lAl * (J .* (u - c)), gf);
+                gf = J .* g;
+                gc = min((~J) .* g, 0);
+                gr = min(lAl * (J .* (u - c)), gf);
                 gp = gf + gc;
                 ne = ne + 1;
             end
 
         else
-            % Proportioning step: move along chopped gradient gc
+            % proportioning step: move along chopped gradient gc
             Ap = A * gc; % COSTLY: matvec
             denom = gc' * Ap;
 
@@ -206,7 +201,11 @@ function [u, info] = mprgp_solver(A, b, c, opts)
             g = g - acg * Ap;
             z = precond_apply(g, J);
             p = z;
-            gf = J .* g; gc = min((~J) .* g, 0); gr = min(lAl * (J .* (u - c)), gf);
+            gf = J .* g;
+            gc = min((~J) .* g, 0);
+
+            gr = min(lAl * (J .* (u - c)), gf);
+
             gp = gf + gc;
             np = np + 1;
         end
@@ -215,6 +214,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
             if opts.verbose, warning('Reached maxit'); end
         end
 
+        disp(norm(gp));
     end
 
     info.ncgs = ncg;
@@ -232,15 +232,4 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
 end
 
-function gr = compute_reduced_gradient(gf, J, u, c, alpha, n)
-    % Compute reduced free gradient: gr = min(lAl * (J .* (u - c)), gf)
-    
-    % --- reduced free gradient (phi_tilde) -- compute exactly elementwise on free set
-    phi = gf;  % free gradient (zero on active)
-    phi_tilde = zeros(n,1);
-    if any(J)
-        % formula: phi_tilde_i = min( (u_i - c_i)/alpha, phi_i) for i in free set
-        phi_tilde(J) = min( (u(J) - c(J)) / alpha, phi(J) );
-    end
-    gr = phi_tilde;
-end
+
