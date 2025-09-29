@@ -67,28 +67,10 @@ function [u, info] = mprgp_solver(A, b, c, opts)
             if opts.verbose, disp('Preconditioner: NONE'); end
 
         case 'jacobi'
-            D = diag(A); % COST: extracting diagonal O(n)
+            D = diag(A);
             D(abs(D) < eps) = 1; % avoid division by zero
             precond_apply = @(g, J) ((g ./ D) .* J); % z = (diag(A)^{-1} g) on free set
             if opts.verbose, disp('Preconditioner: Jacobi (diagonal)'); end
-
-            % case 'ichol'
-            %     % Try incomplete Cholesky; fall back to Jacobi if it fails
-            %     try
-            %         % COST: ichol factorization is one-time and can be expensive for big A.
-            %         % Tweak options if needed (drop tolerance, diagonal compensation)
-            %         % Note: ichol expects symmetric positive definite-ish A
-            %         opts_ichol.type = 'ict';
-            %         opts_ichol.droptol = 1e-3; % tweakable
-            %         L = ichol(A, opts_ichol); % COSTLY: one-time factorization (sparse)
-            %         precond_apply = @(g, J) ((L' \ (L \ g)) .* J); % z = M^{-1} g on free set
-            %         if opts.verbose, disp('Preconditioner: ICHOL (succeeded)'); end
-            %     catch ME
-            %         warning('ichol failed (%s). Falling back to Jacobi preconditioner.', ME.message);
-            %         D = diag(A); D(abs(D) < eps) = 1;
-            %         precond_apply = @(g, J) ((g ./ D) .* J);
-            %         if opts.verbose, disp('Preconditioner: Jacobi (fallback)'); end
-            %     end
 
         otherwise
             error('Unknown preconditioner: %s', opts.precond);
