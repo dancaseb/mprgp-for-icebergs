@@ -42,6 +42,7 @@ opts.maxit = 500;
 opts.Gamma = 1.0;
 opts.verbose = true;
 opts.adapt = true;
+opts.bound = 'upper';  % 'lower' or 'upper'
 [u, info] = mprgp_solver(A, b, c, opts);
 x = u;
 

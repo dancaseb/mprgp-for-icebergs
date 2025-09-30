@@ -18,7 +18,8 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
   INTEGER :: iter, maxiter
   LOGICAL :: Found
 
-  REAL(KIND=dp), ALLOCATABLE :: LowerLim(:)
+  REAL(KIND=dp), ALLOCATABLE :: LowerLim(:), UpperLim(:)
+  INTEGER,   ALLOCATABLE :: LimitFlag(:)
   
 !------------------------------------------------------------------------------
 
@@ -29,8 +30,10 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
   IF(.NOT. Found ) maxiter = 1
 
   n = SIZE(Solver % Variable % Values)
-  ALLOCATE(LowerLim(n))
-  LowerLim = -HUGE(Norm)
+  ALLOCATE(LowerLim(n), UpperLim(n))
+  LowerLim = -HUGE(NORM)
+  UpperLim = HUGE(NORM)
+  LimitFlag = 0
   
   ! Nonlinear iteration loop:
   !--------------------------
@@ -77,8 +80,8 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
 
   ! Save the limit
   OPEN(1,FILE="lim.dat", STATUS='Unknown')
-  DO i=1,SIZE(LowerLim)
-    WRITE(1,*) LowerLim(i)    
+  DO i=1,SIZE(UpperLim)
+    WRITE(1,*) UpperLim(i)    
   END DO
   CLOSE(1)
   
@@ -96,7 +99,7 @@ CONTAINS
     REAL(KIND=dp) :: diff_coeff(n), conv_coeff(n),react_coeff(n), &
                      time_coeff(n), D,C,R, rho,Velo(3,n),a(3), Weight
     REAL(KIND=dp) :: Basis(nd),dBasisdx(nd,3),DetJ,LoadAtIP
-    REAL(KIND=dp) :: MASS(nd,nd), STIFF(nd,nd), FORCE(nd), LOAD(n), LowLim(n)
+    REAL(KIND=dp) :: MASS(nd,nd), STIFF(nd,nd), FORCE(nd), LOAD(n), LowLim(n), UpLim(n)
     LOGICAL :: Stat,Found
     INTEGER :: i,t,p,q,dim
     TYPE(GaussIntegrationPoints_t) :: IP
@@ -119,8 +122,19 @@ CONTAINS
       Load(1:n) = GetReal( BodyForce,'field source', Found )
       LowLim(1:n) = GetReal(BodyForce,'Temp Lower Limit',Found) 
       IF(Found) THEN
-        LowerLim(Solver % Variable % Perm(Element % NodeIndexes)) = LowLim(1:n)
+        INTEGER, DIMENSION(n) :: Gidx
+        Gidx = Solver % Variable % Perm(Element % NodeIndexes)
+        LowerLim(Gidx) = LowLim(1:n)
+        LimitFlag(Gidx) = IOR(LimitFlag(Gidx), 1)   ! bit 1 = lower present
       END IF
+      UpLim(1:n) = GetReal(BodyForce,'Temp Upper Limit',Found)
+      IF(Found) THEN
+        INTEGER, DIMENSION(n) :: Gidx
+        Gidx = Solver % Variable % Perm(Element % NodeIndexes)
+        UpperLim(Gidx) = UpLim(1:n)
+        LimitFlag(Gidx) = IOR(LimitFlag(Gidx), 2)   ! bit 2 = upper present
+      END IF       
+
     END IF
     
        
