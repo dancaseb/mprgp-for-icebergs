@@ -31,9 +31,9 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
 
   n = SIZE(Solver % Variable % Values)
   ALLOCATE(LowerLim(n), UpperLim(n))
-  LowerLim = -HUGE(NORM)
+!  LowerLim = -HUGE(NORM)
   UpperLim = HUGE(NORM)
-  LimitFlag = 0
+!  LimitFlag = 0
   
   ! Nonlinear iteration loop:
   !--------------------------
@@ -120,21 +120,17 @@ CONTAINS
     
     IF ( ASSOCIATED(BodyForce) ) THEN
       Load(1:n) = GetReal( BodyForce,'field source', Found )
-      LowLim(1:n) = GetReal(BodyForce,'Temp Lower Limit',Found) 
-      IF(Found) THEN
-        INTEGER, DIMENSION(n) :: Gidx
-        Gidx = Solver % Variable % Perm(Element % NodeIndexes)
-        LowerLim(Gidx) = LowLim(1:n)
-        LimitFlag(Gidx) = IOR(LimitFlag(Gidx), 1)   ! bit 1 = lower present
-      END IF
+!      LowLim(1:n) = GetReal(BodyForce,'Temp Lower Limit',Found) 
+!      IF(Found) THEN
+!        INTEGER, DIMENSION(n) :: Gidx
+!        Gidx = Solver % Variable % Perm(Element % NodeIndexes)
+!        LowerLim(Gidx) = LowLim(1:n)
+!        LimitFlag(Gidx) = IOR(LimitFlag(Gidx), 1)   ! bit 1 = lower present
+!      END IF
       UpLim(1:n) = GetReal(BodyForce,'Temp Upper Limit',Found)
       IF(Found) THEN
-        INTEGER, DIMENSION(n) :: Gidx
-        Gidx = Solver % Variable % Perm(Element % NodeIndexes)
-        UpperLim(Gidx) = UpLim(1:n)
-        LimitFlag(Gidx) = IOR(LimitFlag(Gidx), 2)   ! bit 2 = upper present
-      END IF       
-
+        UpperLim(Solver % Variable % Perm(Element % NodeIndexes)) = UpLim(1:n)
+      END IF   
     END IF
     
        
