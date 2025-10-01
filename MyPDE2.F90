@@ -196,6 +196,572 @@ CONTAINS
   END SUBROUTINE my_GCR
 
 !------------------------------------------------------------------------------
+  SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, precond, adapt, bound, &
+                      ncg, ne, np, iters, converged, final_norm_gp)
+    USE DefUtils
+    IMPLICIT NONE
+
+    ! ---------------------------
+    ! Arguments
+    ! ---------------------------
+    INTEGER, INTENT(IN) :: n
+    REAL(KIND=dp), INTENT(INOUT) :: x(n)    ! initial guess in, final solution out
+    REAL(KIND=dp), INTENT(IN) :: b(n), c(n) ! rhs and bound
+    REAL(KIND=dp), INTENT(IN) :: epsr
+    INTEGER, INTENT(IN) :: maxit
+    REAL(KIND=dp), INTENT(IN) :: Gamma
+    CHARACTER(*), INTENT(IN) :: precond    ! 'none' or 'jacobi'
+    LOGICAL, INTENT(IN) :: adapt
+    CHARACTER(*), INTENT(IN) :: bound      ! 'lower' or 'upper'
+
+    INTEGER, INTENT(OUT) :: ncg, ne, np, iters
+    LOGICAL, INTENT(OUT) :: converged
+    REAL(KIND=dp), INTENT(OUT) :: final_norm_gp
+
+    ! ---------------------------
+    ! Local declarations (all here)
+    ! ---------------------------
+    REAL(KIND=dp), ALLOCATABLE :: g(:), gf(:), gc(:), gr(:), gp(:)
+    REAL(KIND=dp), ALLOCATABLE :: z(:), p(:), Ap(:), yy(:), D(:)
+    LOGICAL, ALLOCATABLE :: J(:)
+    INTEGER :: bs
+    REAL(KIND=dp) :: lAl, alpha, a_f
+    INTEGER :: i, allocstat
+    REAL(KIND=dp) :: rtp, pAp, acg, beta
+    LOGICAL :: use_jacobi
+    REAL(KIND=dp) :: tmp_norm
+    REAL(KIND=dp) :: eps_local
+    TYPE(Matrix_t), POINTER :: MatA
+
+    ! ---------------------------
+    ! Allocate scratch vectors
+    ! ---------------------------
+    ALLOCATE(g(n), gf(n), gc(n), gr(n), gp(n), z(n), p(n), Ap(n), yy(n), J(n), STAT=allocstat)
+    IF (allocstat /= 0) THEN
+      CALL Fatal('my_MPRGP','Allocation failed for scratch vectors')
+    END IF
+
+    ! ---------------------------
+    ! Preliminaries
+    ! ---------------------------
+    eps_local = EPSILON(1.0_dp)
+
+    ! decide jacobi preconditioner
+    use_jacobi = .FALSE.
+    IF (TRIM(ADJUSTL(precond)) == 'jacobi') THEN
+      use_jacobi = .TRUE.
+    END IF
+
+    ! set bound sign
+    IF (TRIM(ADJUSTL(bound)) == 'upper') THEN
+      bs = -1
+    ELSE
+      bs = 1
+    END IF
+
+    ! set matrix pointer from CurrentModel like my_matvec does
+    MatA => CurrentModel % Solver % Matrix
+
+    ! Prepare diagonal D if jacobi requested
+    IF (use_jacobi) THEN
+      IF (ASSOCIATED(MatA)) THEN
+        ALLOCATE(D(n), STAT=allocstat)
+        IF (allocstat /= 0) THEN
+          CALL Fatal('my_MPRGP','Failed to allocate D(n)')
+        END IF
+        ! Copy diagonal from matrix
+        DO i = 1, n
+          D(i) = MatA % Values(MatA % Diag(i))
+          IF (ABS(D(i)) < EPSILON(1.0_dp)) D(i) = 1.0_dp
+        END DO
+      ELSE
+        use_jacobi = .FALSE.
+      END IF
+    END IF
+
+    ! ---------------------------
+    ! Initialization (g = A*x - b)
+    ! ---------------------------
+    CALL my_matvec(x, g)       ! g = A*x
+    DO i = 1, n
+      g(i) = g(i) - b(i)
+    END DO
+
+    DO i = 1, n
+      J(i) = (bs * x(i) > bs * c(i))
+    END DO
+
+    DO i = 1, n
+      IF (J(i)) THEN
+        gf(i) = g(i)
+      ELSE
+        gf(i) = 0.0_dp
+      END IF
+    END DO
+
+    IF (bs == 1) THEN
+      DO i = 1, n
+        IF (.NOT. J(i)) THEN
+          gc(i) = MIN(g(i), 0.0_dp)
+        ELSE
+          gc(i) = 0.0_dp
+        END IF
+      END DO
+    ELSE
+      DO i = 1, n
+        IF (.NOT. J(i)) THEN
+          gc(i) = MAX(g(i), 0.0_dp)
+        ELSE
+          gc(i) = 0.0_dp
+        END IF
+      END DO
+    END IF
+
+    ! estimate matrix norm ||A|| with a small power iteration
+    CALL estimate_matrix_norm(n, 10, lAl, MatA)
+    IF (lAl <= 0.0_dp) lAl = 1.0_dp
+    alpha = 1.0_dp / lAl
+
+    ! reduced free gradient gr
+    IF (bs == 1) THEN
+      DO i = 1, n
+        IF (J(i)) THEN
+          gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
+        ELSE
+          gr(i) = 0.0_dp
+        END IF
+      END DO
+    ELSE
+      DO i = 1, n
+        IF (J(i)) THEN
+          gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
+        ELSE
+          gr(i) = 0.0_dp
+        END IF
+      END DO
+    END IF
+
+    DO i = 1, n
+      gp(i) = gf(i) + gc(i)
+    END DO
+
+    ! preconditioning: z = M^{-1} * g on free set
+    IF (use_jacobi) THEN
+      DO i = 1, n
+        IF (J(i)) THEN
+          z(i) = g(i) / D(i)
+        ELSE
+          z(i) = 0.0_dp
+        END IF
+      END DO
+    ELSE
+      DO i = 1, n
+        IF (J(i)) THEN
+          z(i) = g(i)
+        ELSE
+          z(i) = 0.0_dp
+        END IF
+      END DO
+    END IF
+
+    p = z
+
+    ! counters
+    ncg = 0
+    ne = 0
+    np = 0
+    iters = 0
+    converged = .FALSE.
+
+    ! ---------------------------
+    ! Main loop
+    ! ---------------------------
+    DO WHILE ( my_normfun(n, gp) > epsr .AND. iters < maxit )
+
+      iters = iters + 1
+      WRITE(*,*) "iteration", iters
+
+      IF ( my_dotprodfun(n, gc, gc) <= (Gamma**2) * my_dotprodfun(n, gr, gf) ) THEN
+        ! CG-like step
+        CALL my_matvec(p, Ap)
+        rtp = my_dotprodfun(n, z, g)
+        pAp = my_dotprodfun(n, p, Ap)
+
+        IF (ABS(pAp) < eps_local) THEN
+          CALL Info('my_MPRGP','p''*A*p nearly zero, stopping',Level=5)
+          EXIT
+        END IF
+
+        acg = rtp / pAp
+        DO i = 1, n
+          yy(i) = x(i) - acg * p(i)
+        END DO
+
+        IF (ALL(bs * yy(:) >= bs * c(:))) THEN
+          ! accept full CG step
+          x = yy
+          DO i = 1, n
+            g(i) = g(i) - acg * Ap(i)
+            J(i) = (bs * x(i) > bs * c(i))
+          END DO
+
+          ! precondition
+          IF (use_jacobi) THEN
+            DO i = 1, n
+              IF (J(i)) THEN
+                z(i) = g(i) / D(i)
+              ELSE
+                z(i) = 0.0_dp
+              END IF
+            END DO
+          ELSE
+            DO i = 1, n
+              IF (J(i)) THEN
+                z(i) = g(i)
+              ELSE
+                z(i) = 0.0_dp
+              END IF
+            END DO
+          END IF
+
+          beta = my_dotprodfun(n, z, Ap) / pAp
+          DO i = 1, n
+            p(i) = z(i) - beta * p(i)
+          END DO
+
+          ! update gf,gc,gr,gp
+          DO i = 1, n
+            IF (J(i)) THEN
+              gf(i) = g(i)
+            ELSE
+              gf(i) = 0.0_dp
+            END IF
+          END DO
+
+          IF (bs == 1) THEN
+            DO i = 1, n
+              IF (.NOT. J(i)) THEN
+                gc(i) = MIN(g(i), 0.0_dp)
+              ELSE
+                gc(i) = 0.0_dp
+              END IF
+            END DO
+            DO i = 1, n
+              IF (J(i)) THEN
+                gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
+              ELSE
+                gr(i) = 0.0_dp
+              END IF
+            END DO
+          ELSE
+            DO i = 1, n
+              IF (.NOT. J(i)) THEN
+                gc(i) = MAX(g(i), 0.0_dp)
+              ELSE
+                gc(i) = 0.0_dp
+              END IF
+            END DO
+            DO i = 1, n
+              IF (J(i)) THEN
+                gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
+              ELSE
+                gr(i) = 0.0_dp
+              END IF
+            END DO
+          END IF
+
+          DO i = 1, n
+            gp(i) = gf(i) + gc(i)
+          END DO
+          ncg = ncg + 1
+
+        ELSE
+          ! expansion step (feasible step)
+          a_f = -1.0_dp
+          DO i = 1, n
+            IF ( (bs * p(i) > 0.0_dp) .AND. J(i) ) THEN
+              tmp_norm = (x(i) - c(i)) / p(i)
+              IF (a_f < 0.0_dp) THEN
+                a_f = tmp_norm
+              ELSE
+                a_f = MIN(a_f, tmp_norm)
+              END IF
+            END IF
+          END DO
+          IF (a_f < 0.0_dp) a_f = 0.0_dp
+
+          IF (bs == 1) THEN
+            DO i = 1, n
+              x(i) = MAX(x(i) - a_f * p(i), c(i))
+            END DO
+          ELSE
+            DO i = 1, n
+              x(i) = MIN(x(i) - a_f * p(i), c(i))
+            END DO
+          END IF
+
+          DO i = 1, n
+            J(i) = (bs * x(i) > bs * c(i))
+            g(i) = g(i) - a_f * Ap(i)
+          END DO
+
+          ! recompute preconditioned residual z
+          IF (use_jacobi) THEN
+            DO i = 1, n
+              IF (J(i)) THEN
+                z(i) = g(i) / D(i)
+              ELSE
+                z(i) = 0.0_dp
+              END IF
+            END DO
+          ELSE
+            DO i = 1, n
+              IF (J(i)) THEN
+                z(i) = g(i)
+              ELSE
+                z(i) = 0.0_dp
+              END IF
+            END DO
+          END IF
+
+          ! adaptive alpha if requested
+          IF (adapt) THEN
+            CALL my_matvec(gr, Ap)
+            tmp_norm = my_dotprodfun(n, gr, g)
+            pAp = my_dotprodfun(n, gr, Ap)
+            IF (ABS(pAp) < eps_local) THEN
+              alpha = 1.0_dp / lAl
+            ELSE
+              alpha = tmp_norm / pAp
+              IF (alpha <= 0.0_dp .OR. alpha > 1.0_dp / lAl) alpha = 1.0_dp / lAl
+            END IF
+          END IF
+
+          IF (bs == 1) THEN
+            DO i = 1, n
+              IF (J(i)) THEN
+                x(i) = MAX(x(i) - alpha * g(i), c(i))
+              END IF
+            END DO
+          ELSE
+            DO i = 1, n
+              IF (J(i)) THEN
+                x(i) = MIN(x(i) - alpha * g(i), c(i))
+              END IF
+            END DO
+          END IF
+
+          CALL my_matvec(x, g)
+          DO i = 1, n
+            g(i) = g(i) - b(i)
+          END DO
+
+          ! recompute z and p
+          IF (use_jacobi) THEN
+            DO i = 1, n
+              IF (J(i)) THEN
+                z(i) = g(i) / D(i)
+              ELSE
+                z(i) = 0.0_dp
+              END IF
+            END DO
+          ELSE
+            DO i = 1, n
+              IF (J(i)) THEN
+                z(i) = g(i)
+              ELSE
+                z(i) = 0.0_dp
+              END IF
+            END DO
+          END IF
+
+          p = z
+
+          ! update gf,gc,gr,gp
+          DO i = 1, n
+            IF (J(i)) THEN
+              gf(i) = g(i)
+            ELSE
+              gf(i) = 0.0_dp
+            END IF
+          END DO
+
+          IF (bs == 1) THEN
+            DO i = 1, n
+              IF (.NOT. J(i)) THEN
+                gc(i) = MIN(g(i), 0.0_dp)
+              ELSE
+                gc(i) = 0.0_dp
+              END IF
+            END DO
+            DO i = 1, n
+              IF (J(i)) THEN
+                gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
+              ELSE
+                gr(i) = 0.0_dp
+              END IF
+            END DO
+          ELSE
+            DO i = 1, n
+              IF (.NOT. J(i)) THEN
+                gc(i) = MAX(g(i), 0.0_dp)
+              ELSE
+                gc(i) = 0.0_dp
+              END IF
+            END DO
+            DO i = 1, n
+              IF (J(i)) THEN
+                gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
+              ELSE
+                gr(i) = 0.0_dp
+              END IF
+            END DO
+          END IF
+
+          DO i = 1, n
+            gp(i) = gf(i) + gc(i)
+          END DO
+          ne = ne + 1
+        END IF
+
+      ELSE
+        ! proportioning step
+        CALL my_matvec(gc, Ap)
+        pAp = my_dotprodfun(n, gc, Ap)
+        IF (ABS(pAp) < eps_local) THEN
+          CALL Info('my_MPRGP','denominator in proportioning nearly zero, stopping',Level=5)
+          EXIT
+        END IF
+        acg = my_dotprodfun(n, gc, g) / pAp
+        DO i = 1, n
+          x(i) = x(i) - acg * gc(i)
+        END DO
+
+        IF (bs == 1) THEN
+          DO i = 1, n
+            IF (x(i) < c(i)) x(i) = c(i)
+          END DO
+        ELSE
+          DO i = 1, n
+            IF (x(i) > c(i)) x(i) = c(i)
+          END DO
+        END IF
+
+        DO i = 1, n
+          J(i) = (bs * x(i) > bs * c(i))
+          g(i) = g(i) - acg * Ap(i)
+        END DO
+
+        IF (use_jacobi) THEN
+          DO i = 1, n
+            IF (J(i)) THEN
+              z(i) = g(i) / D(i)
+            ELSE
+              z(i) = 0.0_dp
+            END IF
+          END DO
+        ELSE
+          DO i = 1, n
+            IF (J(i)) THEN
+              z(i) = g(i)
+            ELSE
+              z(i) = 0.0_dp
+            END IF
+          END DO
+        END IF
+
+        p = z
+
+        ! update gf,gc,gr,gp
+        DO i = 1, n
+          IF (J(i)) THEN
+            gf(i) = g(i)
+          ELSE
+            gf(i) = 0.0_dp
+          END IF
+        END DO
+
+        IF (bs == 1) THEN
+          DO i = 1, n
+            IF (.NOT. J(i)) THEN
+              gc(i) = MIN(g(i), 0.0_dp)
+            ELSE
+              gc(i) = 0.0_dp
+            END IF
+          END DO
+          DO i = 1, n
+            IF (J(i)) THEN
+              gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
+            ELSE
+              gr(i) = 0.0_dp
+            END IF
+          END DO
+        ELSE
+          DO i = 1, n
+            IF (.NOT. J(i)) THEN
+              gc(i) = MAX(g(i), 0.0_dp)
+            ELSE
+              gc(i) = 0.0_dp
+            END IF
+          END DO
+          DO i = 1, n
+            IF (J(i)) THEN
+              gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
+            ELSE
+              gr(i) = 0.0_dp
+            END IF
+          END DO
+        END IF
+
+        DO i = 1, n
+          gp(i) = gf(i) + gc(i)
+        END DO
+        np = np + 1
+      END IF
+
+    END DO  ! main loop
+
+    final_norm_gp = my_normfun(n, gp)
+    converged = (final_norm_gp <= epsr)
+
+    ! cleanup
+    IF (ALLOCATED(D)) DEALLOCATE(D)
+    DEALLOCATE(g, gf, gc, gr, gp, z, p, Ap, yy, J)
+
+    RETURN
+  CONTAINS
+    ! power-method norm estimator using A
+    SUBROUTINE estimate_matrix_norm(nloc, niter, out_norm, Aptr)
+      INTEGER, INTENT(IN) :: nloc, niter
+      REAL(KIND=dp), INTENT(OUT) :: out_norm
+      TYPE(Matrix_t), POINTER :: Aptr
+      REAL(KIND=dp), ALLOCATABLE :: v(:), w(:)
+      INTEGER :: itl, allocstat
+      REAL(KIND=dp) :: normv
+
+      ALLOCATE(v(nloc), w(nloc), STAT=allocstat)
+      IF (allocstat /= 0) THEN
+        CALL Fatal('estimate_matrix_norm','alloc fail')
+      END IF
+
+      DO itl = 1, nloc
+        v(itl) = 1.0_dp / REAL(nloc, dp)
+      END DO
+
+      DO itl = 1, niter
+        CALL CRS_MatrixVectorMultiply(Aptr, v, w)
+        normv = my_normfun(nloc, w)
+        IF (normv <= 0.0_dp) EXIT
+        v = w / normv
+      END DO
+
+      CALL CRS_MatrixVectorMultiply(Aptr, v, w)
+      out_norm = my_normfun(nloc, w)
+
+      DEALLOCATE(v, w)
+    END SUBROUTINE estimate_matrix_norm
+
+  END SUBROUTINE my_MPRGP
   
 END MODULE MyLinearSolver
   
@@ -287,37 +853,54 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
     
     ! And finally, solve:
     !--------------------
-    IF(ListGetLogical(Solver % Values,'My linear solver',Found ) ) THEN
-      BLOCK
-        INTEGER :: n
-        TYPE(Matrix_t), POINTER :: A
-        REAL(KIND=dp), POINTER :: x(:), b(:)
-        INTEGER :: Rounds, MinIter, OutputInterval, m
-        REAL(KIND=dp) :: MinTolerance, MaxTolerance
-        LOGICAL :: Converged, Diverged
-        REAL(KIND=dp) :: Residual
-        
-        n = SIZE(Solver % Variable % Values)
-        A => Solver % Matrix
-        b => Solver % Matrix % Rhs
-        x => Solver % Variable % Values
+  IF(ListGetLogical(Solver % Values,'My linear solver',Found ) ) THEN
+    ! Use custom solver - choose between GCR and MPRGP
+    
+    ! Use MPRGP for bound-constrained problems
+    BLOCK
+      INTEGER :: n_mprgp, ncg, ne, np, iters
+      TYPE(Matrix_t), POINTER :: A
+      REAL(KIND=dp), POINTER :: x(:), b(:)
+      REAL(KIND=dp), ALLOCATABLE :: c(:)
+      LOGICAL :: converged_mprgp
+      REAL(KIND=dp) :: final_norm_gp
+      CHARACTER(LEN=10) :: bound_type
+      
+      n_mprgp = SIZE(Solver % Variable % Values)
+      A => Solver % Matrix
+      b => Solver % Matrix % Rhs
+      x => Solver % Variable % Values
+      
+      ! Prepare bound constraint vector
+      ALLOCATE(c(n_mprgp))
+      IF(UpperLim) THEN
+        c = LimVal
+        bound_type = 'upper'
+      ELSE
+        c = LimVal
+        bound_type = 'lower'
+      END IF
+      
+      CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, 'jacobi', .FALSE., &
+            bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
+      
+      CALL Info('AdvDiffSolver','MPRGP finished: iters='//I2S(iters)// &
+                ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
+      ! Save the x
 
-        Rounds = ListGetInteger( Params,'Linear System Max Iterations',Found )
-        MinIter = ListGetInteger( Params,'Linear System Min Iterations',Found )
-        MinTolerance = ListGetCReal( Params,'Linear System Convergence Tolerance',Found )
-        MaxTolerance = 1.0e20
-        OutputInterval = ListGetInteger( Params,'Linear System Residual Output', Found )               
-        m = ListGetInteger( Params,'Linear System GCR Restart', Found )
-        IF(.NOT. Found ) m = MIN(Rounds, 200)
-        
-        CALL my_GCR( n, A, x, b, Rounds, MinTolerance, MaxTolerance, Residual, &
-            Converged, Diverged, OutputInterval, m, MinIter) 
-        
-      END BLOCK
-    ELSE
-      Norm = DefaultSolve()      
-      IF( DefaultConverged() ) EXIT    
-    END IF      
+      OPEN(1,FILE="x_mprgp.dat", STATUS='Unknown')
+      DO i=1,SIZE(x)
+        WRITE(1,*) x(i)    
+      END DO
+      CLOSE(1)
+
+      DEALLOCATE(c)
+    END BLOCK
+    
+  ELSE
+    Norm = DefaultSolve()      
+    IF( DefaultConverged() ) EXIT    
+  END IF
 
   END DO
 
