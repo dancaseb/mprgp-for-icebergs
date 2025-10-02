@@ -53,19 +53,10 @@ function [u, info] = mprgp_solver(A, b, c, opts)
         bs = 1;
     end
 
-    disp('bs'); disp(bs);
-    % bs=1;
-
     % column vectors
     b = b(:);
     c = c(:);
 
-    % Initial feasible point: start at the bounds
-    % if bs == 1
-    %     u = max(zeros(n, 1), c);
-    % else
-    %     u = max(zeros(n, 1), c);
-    % end
     u = c;
 
     lAl = normest(A); % estimate of ||A||_2, cheaper than full norm
@@ -92,15 +83,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
     % initialization
     g = A * u - b; % gradient (Cost: matvec operation)
-    disp(' u '); disp(u(1:10));
-    disp('A * u'); disp((A * u)(1:10));
-    disp('g')
-    disp(g(1:10));
     J = (bs .* u > bs .* c); % logical free-set indicator
-    % disp('J:');disp(J);
-    disp('size J:'); disp(size(J));
-    disp('num free:'); disp(sum(J));
-    disp('g norm:'); disp(norm(g));
     gf = J .* g; % free gradient
 
     if bs == 1
@@ -116,9 +99,9 @@ function [u, info] = mprgp_solver(A, b, c, opts)
     else
         gr = max(lAl * (J .* (u - c)), gf); % reduced free gradient (O(n)), phi tilde in paper
     end
+
     % probably replace this with a max? in upper bound case. Not sure.
     gp = gf + gc; % projected gradient
-    disp('gf, gc, gp norms:'); disp([norm(gf), norm(gc), norm(gp)]);
 
     z = precond_apply(g, J);
     p = z; % search direction
@@ -160,17 +143,14 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
                 if bs == 1
                     gc = min((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
+                    gr = min(lAl * (J .* (u - c)), gf);
                 end
 
                 if bs == -1
                     gc = max((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
-                end
-
-                if bs == 1
-                    gr = min(lAl * (J .* (u - c)), gf);
-                else
                     gr = max(lAl * (J .* (u - c)), gf);
                 end
+
                 gp = gf + gc;
                 ncg = ncg + 1;
             else
@@ -190,6 +170,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
                 else
                     u = min(u - a * p, c); % enforce feasibility
                 end
+
                 J = (bs .* u > bs .* c);
                 g = g - a * Ap; % update gradient
                 % recompute preconditioned residual
@@ -211,6 +192,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
                 else
                     u = min(u - alpha * (J .* g), c);
                 end
+
                 J = (bs .* u > bs .* c);
                 g = A * u - b; % Cost (matvec)
                 z = precond_apply(g, J);
@@ -219,17 +201,15 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
                 if bs == 1
                     gc = min((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
+                    gr = min(lAl * (J .* (u - c)), gf);
+
                 end
 
                 if bs == -1
                     gc = max((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
-                end
-
-                if bs ==1
-                    gr = min(lAl * (J .* (u - c)), gf);
-                else
                     gr = max(lAl * (J .* (u - c)), gf);
                 end
+
                 gp = gf + gc;
                 ne = ne + 1;
             end
@@ -246,11 +226,13 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
             acg = (gc' * g) / denom;
             u = u - acg * gc;
+
             if bs == 1
                 u = max(u, c); % enforce feasibility numerically
             else
                 u = min(u, c); % enforce feasibility numerically
             end
+
             J = (bs .* u > bs .* c);
             g = g - acg * Ap;
             z = precond_apply(g, J);
@@ -259,15 +241,12 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
             if bs == 1
                 gc = min((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
+                gr = min(lAl * (J .* (u - c)), gf);
+
             end
 
             if bs == -1
                 gc = max((~J) .* g, 0); % chopped gradient (O(n)), beta in paper
-            end
-
-            if bs == 1
-                gr = min(lAl * (J .* (u - c)), gf);
-            else
                 gr = max(lAl * (J .* (u - c)), gf);
             end
 
@@ -279,7 +258,6 @@ function [u, info] = mprgp_solver(A, b, c, opts)
             if opts.verbose, warning('Reached maxit'); end
         end
 
-        % disp(norm(gp));
     end
 
     info.ncgs = ncg;

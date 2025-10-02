@@ -44,157 +44,6 @@ CONTAINS
   ! but the they should be pretty much the same. Probably have some additional vector and logical
   ! for the upper/lower limit. 
   
-  SUBROUTINE my_GCR( n, A, x, b, Rounds, MinTolerance, MaxTolerance, Residual, &
-      Converged, Diverged, OutputInterval, m, MinIter) 
-!------------------------------------------------------------------------------
-    TYPE(Matrix_t), POINTER :: A
-    INTEGER :: Rounds, MinIter
-    REAL(KIND=dp) :: x(n),b(n)
-    LOGICAL :: Converged, Diverged
-    REAL(KIND=dp) :: MinTolerance, MaxTolerance, Residual
-    INTEGER :: n, OutputInterval, m
-    REAL(KIND=dp) :: bnorm,rnorm
-    REAL(KIND=dp), ALLOCATABLE :: R(:)    
-    REAL(KIND=dp), ALLOCATABLE :: S(:,:), V(:,:), T1(:), T2(:)
-
-!------------------------------------------------------------------------------
-    INTEGER :: i,j,k
-    REAL(KIND=dp) :: alpha, beta
-!------------------------------------------------------------------------------
-    INTEGER :: allocstat
-
-    ALLOCATE( R(n), T1(n), T2(n), STAT=allocstat )
-    IF( allocstat /= 0 ) THEN
-      CALL Fatal('GCR','Failed to allocate memory of size: '//I2S(n))
-    END IF
-
-    IF ( m > 1 ) THEN
-      ALLOCATE( S(n,m-1), V(n,m-1), STAT=allocstat )
-      IF( allocstat /= 0 ) THEN
-        CALL Fatal('GCR','Failed to allocate memory of size: '&
-            //I2S(n)//' x '//I2S(m-1))
-      END IF
-
-      V(1:n,1:m-1) = 0.0d0	
-      S(1:n,1:m-1) = 0.0d0
-    END IF
-
-!    CALL C_matvec( x, r, ipar, matvecsubr )
-    CALL my_matvec( x, r )
-    r(1:n) = b(1:n) - r(1:n)
-
-!    bnorm = normfun(n, b, 1)
-!    rnorm = normfun(n, r, 1)
-    bnorm = my_normfun(n, b)
-    rnorm = my_normfun(n, r)
-
-    !IF (UseStopCFun) THEN
-    !  Residual = stopcfun(x,b,r,ipar,dpar)
-    !ELSE
-      Residual = rnorm / bnorm
-    !END IF
-
-      Converged = (Residual < MinTolerance) .AND. ( MinIter <= 0 )
-      Diverged = (Residual > MaxTolerance) .OR. (Residual /= Residual)
-      IF( Converged .OR. Diverged) RETURN
-
-    
-    DO k=1,Rounds
-      !----------------------------------------------
-      ! Check for restarting
-      !----------------------------------------------
-      IF ( MOD(k,m)==0 ) THEN
-        j = m
-      ELSE
-        j = MOD(k,m)
-        !--------------------------------------------
-        ! Compute the true residual when restarting:
-        !--------------------------------------------
-        IF ( (j==1) .AND. (k>1) ) THEN
-!          CALL C_matvec( x, r, ipar, matvecsubr )
-          CALL my_matvec( x, r )
-          r(1:n) = b(1:n) - r(1:n)
-        END IF
-      END IF
-      
-      !----------------------------------------------------------
-      ! Perform the preconditioning...
-      !---------------------------------------------------------------
-      !CALL C_rpcond( T1, r, ipar, pcondrsubr )
-      CALL my_rpcond( T1, r )
-      !CALL C_matvec( T1, T2, ipar, matvecsubr )
-      CALL my_matvec( T1, T2 )
-      
-      !--------------------------------------------------------------
-      ! Perform the orthogonalization of the search directions....
-      !--------------------------------------------------------------
-      DO i=1,j-1
-!        beta = dotprodfun(n, V(1:n,i), 1, T2(1:n), 1 )
-        beta = my_dotprodfun(n, V(1:n,i), T2(1:n) )
-
-        T1(1:n) = T1(1:n) - beta * S(1:n,i)
-        T2(1:n) = T2(1:n) - beta * V(1:n,i)        
-      END DO
-
-!      alpha = normfun(n, T2(1:n), 1 )
-      alpha = my_normfun(n, T2(1:n) )
-      T1(1:n) = 1.0d0/alpha * T1(1:n)
-      T2(1:n) = 1.0d0/alpha * T2(1:n)
-      
-      !-------------------------------------------------------------
-      ! The update of the solution and save the search data...
-      !------------------------------------------------------------- 
-!      beta = dotprodfun(n, T2(1:n), 1, r(1:n), 1 )
-      beta = my_dotprodfun(n, T2(1:n), r(1:n) )
-
-      x(1:n) = x(1:n) + beta * T1(1:n)      
-      r(1:n) = r(1:n) - beta * T2(1:n)
-
-      IF ( j /= m ) THEN
-        S(1:n,j) = T1(1:n)
-        V(1:n,j) = T2(1:n)
-      END IF
-
-      !--------------------------------------------------------------
-      ! Check whether the convergence criterion is met 
-      !--------------------------------------------------------------
-      !rnorm = normfun(n, r, 1)
-      rnorm = my_normfun(n, r)
-
-      !IF (UseStopCFun) THEN
-        !Residual = stopcfun(x,b,r,ipar,dpar)
-      !  IF( MOD(k,OutputInterval) == 0) THEN
-      !    WRITE (*, '(A, I6, 2E12.4)') '   gcr:',k, rnorm / bnorm, residual
-      !    CALL FLUSH(6)
-      !  END IF
-      !ELSE
-        Residual = rnorm / bnorm
-        IF( MOD(k,OutputInterval) == 0) THEN
-          WRITE (*, '(A, I6, 2E12.4)') '   gcr:',k, residual, beta
-          CALL FLUSH(6)
-        END IF
-      !END IF
-
-      Converged = (Residual < MinTolerance) .AND. ( k >= MinIter )
-      !-----------------------------------------------------------------
-      ! Make an additional check that the true residual agrees with 
-      ! the iterated residual:
-      !-----------------------------------------------------------------
-      IF (Converged ) THEN
-        WRITE( Message,'(A,I0,A,ES12.3)') 'Iterated residual norm after ',k,' iters:', rnorm
-        CALL Info('IterMethod_GCR', Message, Level=5)
-        CALL Info('IterMethod_GCR','Total number of GCR iterations: '//I2S(k), Level=5)                     
-      END IF
-      Diverged = (Residual > MaxTolerance) .OR. (Residual /= Residual)    
-      IF( Converged .OR. Diverged) EXIT
-
-    END DO
-
-    DEALLOCATE( R, T1, T2 )
-    IF ( m > 1 ) DEALLOCATE( S, V)
-
-  END SUBROUTINE my_GCR
-
 !------------------------------------------------------------------------------
   SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, precond, adapt, bound, &
                       ncg, ne, np, iters, converged, final_norm_gp)
@@ -291,13 +140,7 @@ CONTAINS
       J(i) = (bs * x(i) > bs * c(i))
     END DO
 
-    DO i = 1, n
-      IF (J(i)) THEN
-        gf(i) = g(i)
-      ELSE
-        gf(i) = 0.0_dp
-      END IF
-    END DO
+    gf = MERGE(g, 0.0_dp, J)
 
     IF (bs == 1) THEN
       DO i = 1, n
@@ -309,7 +152,7 @@ CONTAINS
       END DO
     ELSE
       DO i = 1, n
-        IF (.NOT. J(i)) THEN
+        IF (.NOT. J(i)) THEN  ! WHERE COMMAND FOR vECTORS
           gc(i) = MAX(g(i), 0.0_dp)
         ELSE
           gc(i) = 0.0_dp
@@ -324,27 +167,14 @@ CONTAINS
 
     ! reduced free gradient gr
     IF (bs == 1) THEN
-      DO i = 1, n
-        IF (J(i)) THEN
-          gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
-        ELSE
-          gr(i) = 0.0_dp
-        END IF
-      END DO
+      gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
     ELSE
-      DO i = 1, n
-        IF (J(i)) THEN
-          gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
-        ELSE
-          gr(i) = 0.0_dp
-        END IF
-      END DO
+      gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
     END IF
 
-    DO i = 1, n
-      gp(i) = gf(i) + gc(i)
-    END DO
+    gp = gf + gc
 
+    ! TODO - write this as a function
     ! preconditioning: z = M^{-1} * g on free set
     IF (use_jacobi) THEN
       DO i = 1, n
@@ -393,17 +223,14 @@ CONTAINS
         END IF
 
         acg = rtp / pAp
-        DO i = 1, n
-          yy(i) = x(i) - acg * p(i)
-        END DO
+        yy = x - acg * p
+
 
         IF (ALL(bs * yy(:) >= bs * c(:))) THEN
           ! accept full CG step
           x = yy
-          DO i = 1, n
-            g(i) = g(i) - acg * Ap(i)
-            J(i) = (bs * x(i) > bs * c(i))
-          END DO
+          g = g - acg * Ap
+          J = (bs * x > bs * c)
 
           ! precondition
           IF (use_jacobi) THEN
@@ -425,54 +252,29 @@ CONTAINS
           END IF
 
           beta = my_dotprodfun(n, z, Ap) / pAp
-          DO i = 1, n
-            p(i) = z(i) - beta * p(i)
-          END DO
+
+          p = z - beta * p
+
 
           ! update gf,gc,gr,gp
-          DO i = 1, n
-            IF (J(i)) THEN
-              gf(i) = g(i)
-            ELSE
-              gf(i) = 0.0_dp
-            END IF
-          END DO
+          gf = MERGE(g, 0.0_dp, J)
 
           IF (bs == 1) THEN
-            DO i = 1, n
-              IF (.NOT. J(i)) THEN
-                gc(i) = MIN(g(i), 0.0_dp)
-              ELSE
-                gc(i) = 0.0_dp
-              END IF
-            END DO
-            DO i = 1, n
-              IF (J(i)) THEN
-                gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
-              ELSE
-                gr(i) = 0.0_dp
-              END IF
-            END DO
+            gc = 0.0_dp
+            WHERE (.NOT. J)
+              gc = MIN(g, 0.0_dp)
+            END WHERE
+            gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
           ELSE
-            DO i = 1, n
-              IF (.NOT. J(i)) THEN
-                gc(i) = MAX(g(i), 0.0_dp)
-              ELSE
-                gc(i) = 0.0_dp
-              END IF
-            END DO
-            DO i = 1, n
-              IF (J(i)) THEN
-                gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
-              ELSE
-                gr(i) = 0.0_dp
-              END IF
-            END DO
+            gc = 0.0_dp
+            WHERE (.NOT. J)
+              gc = MAX(g, 0.0_dp)
+            END WHERE
+            gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
           END IF
 
-          DO i = 1, n
-            gp(i) = gf(i) + gc(i)
-          END DO
+          gp = gf + gc
+
           ncg = ncg + 1
 
         ELSE
@@ -491,19 +293,15 @@ CONTAINS
           IF (a_f < 0.0_dp) a_f = 0.0_dp
 
           IF (bs == 1) THEN
-            DO i = 1, n
-              x(i) = MAX(x(i) - a_f * p(i), c(i))
-            END DO
+              x = MAX(x - a_f * p, c)
           ELSE
-            DO i = 1, n
-              x(i) = MIN(x(i) - a_f * p(i), c(i))
-            END DO
+              x = MIN(x - a_f * p, c)
           END IF
 
-          DO i = 1, n
-            J(i) = (bs * x(i) > bs * c(i))
-            g(i) = g(i) - a_f * Ap(i)
-          END DO
+
+          J = (bs * x > bs * c)
+          g = g - a_f * Ap
+
 
           ! recompute preconditioned residual z
           IF (use_jacobi) THEN
@@ -538,23 +336,17 @@ CONTAINS
           END IF
 
           IF (bs == 1) THEN
-            DO i = 1, n
-              IF (J(i)) THEN
-                x(i) = MAX(x(i) - alpha * g(i), c(i))
-              END IF
-            END DO
+            WHERE (J)
+              x = MAX(x - alpha * g, c)
+            END WHERE
           ELSE
-            DO i = 1, n
-              IF (J(i)) THEN
-                x(i) = MIN(x(i) - alpha * g(i), c(i))
-              END IF
-            END DO
+            WHERE (J)
+              x = MIN(x - alpha * g, c)
+            END WHERE
           END IF
 
           CALL my_matvec(x, g)
-          DO i = 1, n
-            g(i) = g(i) - b(i)
-          END DO
+          g = g - b
 
           ! recompute z and p
           IF (use_jacobi) THEN
@@ -578,49 +370,24 @@ CONTAINS
           p = z
 
           ! update gf,gc,gr,gp
-          DO i = 1, n
-            IF (J(i)) THEN
-              gf(i) = g(i)
-            ELSE
-              gf(i) = 0.0_dp
-            END IF
-          END DO
+          gf = MERGE(g, 0.0_dp, J)
+
 
           IF (bs == 1) THEN
-            DO i = 1, n
-              IF (.NOT. J(i)) THEN
-                gc(i) = MIN(g(i), 0.0_dp)
-              ELSE
-                gc(i) = 0.0_dp
-              END IF
-            END DO
-            DO i = 1, n
-              IF (J(i)) THEN
-                gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
-              ELSE
-                gr(i) = 0.0_dp
-              END IF
-            END DO
+            gc = 0.0_dp
+            WHERE (.NOT. J)
+              gc = MIN(g, 0.0_dp)
+            END WHERE
+            gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
           ELSE
-            DO i = 1, n
-              IF (.NOT. J(i)) THEN
-                gc(i) = MAX(g(i), 0.0_dp)
-              ELSE
-                gc(i) = 0.0_dp
-              END IF
-            END DO
-            DO i = 1, n
-              IF (J(i)) THEN
-                gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
-              ELSE
-                gr(i) = 0.0_dp
-              END IF
-            END DO
+            gc = 0.0_dp
+            WHERE (.NOT. J)
+              gc = MAX(g, 0.0_dp)
+            END WHERE
+            gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
           END IF
 
-          DO i = 1, n
-            gp(i) = gf(i) + gc(i)
-          END DO
+          gp = gf + gc
           ne = ne + 1
         END IF
 
@@ -633,9 +400,8 @@ CONTAINS
           EXIT
         END IF
         acg = my_dotprodfun(n, gc, g) / pAp
-        DO i = 1, n
-          x(i) = x(i) - acg * gc(i)
-        END DO
+
+        x = x - acg * gc
 
         IF (bs == 1) THEN
           DO i = 1, n
@@ -647,10 +413,8 @@ CONTAINS
           END DO
         END IF
 
-        DO i = 1, n
-          J(i) = (bs * x(i) > bs * c(i))
-          g(i) = g(i) - acg * Ap(i)
-        END DO
+        J = (bs * x > bs * c)
+        g = g - acg * Ap
 
         IF (use_jacobi) THEN
           DO i = 1, n
@@ -673,49 +437,24 @@ CONTAINS
         p = z
 
         ! update gf,gc,gr,gp
-        DO i = 1, n
-          IF (J(i)) THEN
-            gf(i) = g(i)
-          ELSE
-            gf(i) = 0.0_dp
-          END IF
-        END DO
+        gf = MERGE(g, 0.0_dp, J)
 
         IF (bs == 1) THEN
-          DO i = 1, n
-            IF (.NOT. J(i)) THEN
-              gc(i) = MIN(g(i), 0.0_dp)
-            ELSE
-              gc(i) = 0.0_dp
-            END IF
-          END DO
-          DO i = 1, n
-            IF (J(i)) THEN
-              gr(i) = MIN(lAl * (x(i) - c(i)), gf(i))
-            ELSE
-              gr(i) = 0.0_dp
-            END IF
-          END DO
+          gc = 0.0_dp
+          WHERE (.NOT. J)
+            gc = MIN(g, 0.0_dp)
+          END WHERE
+          gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
+
         ELSE
-          DO i = 1, n
-            IF (.NOT. J(i)) THEN
-              gc(i) = MAX(g(i), 0.0_dp)
-            ELSE
-              gc(i) = 0.0_dp
-            END IF
-          END DO
-          DO i = 1, n
-            IF (J(i)) THEN
-              gr(i) = MAX(lAl * (x(i) - c(i)), gf(i))
-            ELSE
-              gr(i) = 0.0_dp
-            END IF
-          END DO
+          gc = 0.0_dp
+          WHERE (.NOT. J)
+            gc = MAX(g, 0.0_dp)
+          END WHERE
+          gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
         END IF
 
-        DO i = 1, n
-          gp(i) = gf(i) + gc(i)
-        END DO
+        gp = gf + gc
         np = np + 1
       END IF
 
@@ -765,7 +504,6 @@ CONTAINS
   
 END MODULE MyLinearSolver
   
-
 
 !------------------------------------------------------------------------------
 SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
@@ -887,6 +625,11 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
       CALL Info('AdvDiffSolver','MPRGP finished: iters='//I2S(iters)// &
                 ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
       ! Save the x
+
+      IF (converged_mprgp .OR. final_norm_gp <= 1.0e-8_dp) THEN
+        CALL Info('AdvDiffSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
+        EXIT   ! breaks DO iter=1,maxiter
+      END IF
 
       OPEN(1,FILE="x_mprgp.dat", STATUS='Unknown')
       DO i=1,SIZE(x)
