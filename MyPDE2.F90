@@ -12,18 +12,30 @@ CONTAINS
     CALL CRS_MatrixVectorMultiply( A,x,r )
   END SUBROUTINE my_matvec
     
-  SUBROUTINE my_rpcond(x,r)
-    REAL(KIND=dp) :: x(:), r(:)
-    TYPE(Matrix_t), POINTER :: A
-    LOGICAL :: Found
-    IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
-        == 'diagonal' ) THEN
-      A => CurrentModel % Solver % Matrix
+SUBROUTINE my_rpcond(x, r, J)
+  REAL(KIND=dp) :: x(:), r(:)
+  LOGICAL :: J(:)  ! free-set mask
+  TYPE(Matrix_t), POINTER :: A
+  LOGICAL :: Found
+  INTEGER :: i
+  
+  IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
+      == 'diagonal' ) THEN
+    A => CurrentModel % Solver % Matrix
+    WHERE (J)
       x = r / A % Values(A % Diag)
-    ELSE
-      x = r 
-    END IF    
-  END SUBROUTINE my_rpcond
+    ELSEWHERE
+      x = 0.0_dp
+    END WHERE
+  ELSE
+    ! No preconditioning, but still mask by free set
+    WHERE (J)
+      x = r
+    ELSEWHERE
+      x = 0.0_dp
+    END WHERE
+  END IF    
+END SUBROUTINE my_rpcond
 
   FUNCTION my_normfun(n, b) RESULT ( bnorm ) 
     REAL(KIND=dp) :: b(:)
@@ -45,7 +57,7 @@ CONTAINS
   ! for the upper/lower limit. 
   
 !------------------------------------------------------------------------------
-  SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, precond, adapt, bound, &
+  SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
                       ncg, ne, np, iters, converged, final_norm_gp)
     USE DefUtils
     IMPLICIT NONE
@@ -59,7 +71,6 @@ CONTAINS
     REAL(KIND=dp), INTENT(IN) :: epsr
     INTEGER, INTENT(IN) :: maxit
     REAL(KIND=dp), INTENT(IN) :: Gamma
-    CHARACTER(*), INTENT(IN) :: precond    ! 'none' or 'jacobi'
     LOGICAL, INTENT(IN) :: adapt
     CHARACTER(*), INTENT(IN) :: bound      ! 'lower' or 'upper'
 
@@ -77,7 +88,6 @@ CONTAINS
     REAL(KIND=dp) :: lAl, alpha, a_f
     INTEGER :: i, allocstat
     REAL(KIND=dp) :: rtp, pAp, acg, beta
-    LOGICAL :: use_jacobi
     REAL(KIND=dp) :: tmp_norm
     REAL(KIND=dp) :: eps_local
     TYPE(Matrix_t), POINTER :: MatA
@@ -95,12 +105,6 @@ CONTAINS
     ! ---------------------------
     eps_local = EPSILON(1.0_dp)
 
-    ! decide jacobi preconditioner
-    use_jacobi = .FALSE.
-    IF (TRIM(ADJUSTL(precond)) == 'jacobi') THEN
-      use_jacobi = .TRUE.
-    END IF
-
     ! set bound sign
     IF (TRIM(ADJUSTL(bound)) == 'upper') THEN
       bs = -1
@@ -110,23 +114,6 @@ CONTAINS
 
     ! set matrix pointer from CurrentModel like my_matvec does
     MatA => CurrentModel % Solver % Matrix
-
-    ! Prepare diagonal D if jacobi requested
-    IF (use_jacobi) THEN
-      IF (ASSOCIATED(MatA)) THEN
-        ALLOCATE(D(n), STAT=allocstat)
-        IF (allocstat /= 0) THEN
-          CALL Fatal('my_MPRGP','Failed to allocate D(n)')
-        END IF
-        ! Copy diagonal from matrix
-        DO i = 1, n
-          D(i) = MatA % Values(MatA % Diag(i))
-          IF (ABS(D(i)) < EPSILON(1.0_dp)) D(i) = 1.0_dp
-        END DO
-      ELSE
-        use_jacobi = .FALSE.
-      END IF
-    END IF
 
     ! ---------------------------
     ! Initialization (g = A*x - b)
@@ -143,21 +130,17 @@ CONTAINS
     gf = MERGE(g, 0.0_dp, J)
 
     IF (bs == 1) THEN
-      DO i = 1, n
-        IF (.NOT. J(i)) THEN
-          gc(i) = MIN(g(i), 0.0_dp)
-        ELSE
-          gc(i) = 0.0_dp
-        END IF
-      END DO
+      WHERE (.NOT. J)
+        gc = MIN(g, 0.0_dp)
+      ELSEWHERE
+        gc = 0.0_dp
+      END WHERE
     ELSE
-      DO i = 1, n
-        IF (.NOT. J(i)) THEN  ! WHERE COMMAND FOR vECTORS
-          gc(i) = MAX(g(i), 0.0_dp)
-        ELSE
-          gc(i) = 0.0_dp
-        END IF
-      END DO
+      WHERE (.NOT. J)  ! WHERE COMMAND FOR vECTORS
+        gc = MAX(g, 0.0_dp)
+      ELSEWHERE
+        gc = 0.0_dp
+      END WHERE
     END IF
 
     ! estimate matrix norm ||A|| with a small power iteration
@@ -176,23 +159,7 @@ CONTAINS
 
     ! TODO - write this as a function
     ! preconditioning: z = M^{-1} * g on free set
-    IF (use_jacobi) THEN
-      DO i = 1, n
-        IF (J(i)) THEN
-          z(i) = g(i) / D(i)
-        ELSE
-          z(i) = 0.0_dp
-        END IF
-      END DO
-    ELSE
-      DO i = 1, n
-        IF (J(i)) THEN
-          z(i) = g(i)
-        ELSE
-          z(i) = 0.0_dp
-        END IF
-      END DO
-    END IF
+    CALL my_rpcond(z, g, J)
 
     p = z
 
@@ -233,28 +200,10 @@ CONTAINS
           J = (bs * x > bs * c)
 
           ! precondition
-          IF (use_jacobi) THEN
-            DO i = 1, n
-              IF (J(i)) THEN
-                z(i) = g(i) / D(i)
-              ELSE
-                z(i) = 0.0_dp
-              END IF
-            END DO
-          ELSE
-            DO i = 1, n
-              IF (J(i)) THEN
-                z(i) = g(i)
-              ELSE
-                z(i) = 0.0_dp
-              END IF
-            END DO
-          END IF
+          CALL my_rpcond(z, g, J)
 
           beta = my_dotprodfun(n, z, Ap) / pAp
-
           p = z - beta * p
-
 
           ! update gf,gc,gr,gp
           gf = MERGE(g, 0.0_dp, J)
@@ -272,13 +221,11 @@ CONTAINS
             END WHERE
             gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
           END IF
-
           gp = gf + gc
-
           ncg = ncg + 1
-
         ELSE
           ! expansion step (feasible step)
+          ! TODO revise if this is correct
           a_f = -1.0_dp
           DO i = 1, n
             IF ( (bs * p(i) > 0.0_dp) .AND. J(i) ) THEN
@@ -298,29 +245,11 @@ CONTAINS
               x = MIN(x - a_f * p, c)
           END IF
 
-
           J = (bs * x > bs * c)
           g = g - a_f * Ap
 
-
           ! recompute preconditioned residual z
-          IF (use_jacobi) THEN
-            DO i = 1, n
-              IF (J(i)) THEN
-                z(i) = g(i) / D(i)
-              ELSE
-                z(i) = 0.0_dp
-              END IF
-            END DO
-          ELSE
-            DO i = 1, n
-              IF (J(i)) THEN
-                z(i) = g(i)
-              ELSE
-                z(i) = 0.0_dp
-              END IF
-            END DO
-          END IF
+          CALL my_rpcond(z, g, J)
 
           ! adaptive alpha if requested
           IF (adapt) THEN
@@ -349,29 +278,11 @@ CONTAINS
           g = g - b
 
           ! recompute z and p
-          IF (use_jacobi) THEN
-            DO i = 1, n
-              IF (J(i)) THEN
-                z(i) = g(i) / D(i)
-              ELSE
-                z(i) = 0.0_dp
-              END IF
-            END DO
-          ELSE
-            DO i = 1, n
-              IF (J(i)) THEN
-                z(i) = g(i)
-              ELSE
-                z(i) = 0.0_dp
-              END IF
-            END DO
-          END IF
-
+          CALL my_rpcond(z, g, J)
           p = z
 
           ! update gf,gc,gr,gp
           gf = MERGE(g, 0.0_dp, J)
-
 
           IF (bs == 1) THEN
             gc = 0.0_dp
@@ -416,24 +327,7 @@ CONTAINS
         J = (bs * x > bs * c)
         g = g - acg * Ap
 
-        IF (use_jacobi) THEN
-          DO i = 1, n
-            IF (J(i)) THEN
-              z(i) = g(i) / D(i)
-            ELSE
-              z(i) = 0.0_dp
-            END IF
-          END DO
-        ELSE
-          DO i = 1, n
-            IF (J(i)) THEN
-              z(i) = g(i)
-            ELSE
-              z(i) = 0.0_dp
-            END IF
-          END DO
-        END IF
-
+        CALL my_rpcond(z, g, J)
         p = z
 
         ! update gf,gc,gr,gp
@@ -619,7 +513,7 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
         bound_type = 'lower'
       END IF
       
-      CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, 'jacobi', .FALSE., &
+      CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
             bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
       
       CALL Info('AdvDiffSolver','MPRGP finished: iters='//I2S(iters)// &

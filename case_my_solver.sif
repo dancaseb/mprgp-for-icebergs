@@ -14,7 +14,7 @@ Simulation
   Post File = case_my_solver.vtu
   Ascii Output = True
 
-  Mesh Levels = 2
+  Mesh Levels = 1
 
 End
 
@@ -69,7 +69,7 @@ Solver 1
   Linear System Iterative Method = BiCGStab
   Linear System Max Iterations = 500
   Linear System Convergence Tolerance = 1.0e-8
-  Linear System Preconditioning = ILU1
+  Linear System Preconditioning = diagonal
   Linear System ILUT Tolerance = 1.0e-3
   Linear System Abort Not Converged = False
   Linear System Residual Output = 10
