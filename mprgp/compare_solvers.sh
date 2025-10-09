@@ -10,8 +10,13 @@ else
 fi
 
 # Step 1: Run ElmerSolver with different solvers
-ElmerSolver case.sif
-ElmerSolver case_my_solver.sif
+rm -f output_default_solver.csv
+rm -f output_my_solver.csv
+rm -f ../square/case_default_solver_t0001.vtu
+rm -f ../square/case_my_solver_t0001.vtu
+
+ElmerSolver test-cases/case.sif
+ElmerSolver test-cases/case_my_solver.sif
 
 cd mprgp
 
