@@ -463,8 +463,12 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
   maxiter = ListGetInteger( Params,'Nonlinear System Max Iterations',Found,minv=1)
   IF(.NOT. Found ) maxiter = 1
 
-  LowerLim = ListCheckPresentAnyBodyForce(Model,'Temp Lower Limit')
-  UpperLim = ListCheckPresentAnyBodyForce(Model,'Temp Upper Limit')
+
+  LowerLim = ListCheckPresentAnyBodyForce(Model,'Temp Lower Limit') .OR. &
+      ListCheckPresentAnyBC(Model,'Temp Lower Limit') 
+  UpperLim = ListCheckPresentAnyBodyForce(Model,'Temp Upper Limit') .OR. &
+      ListCheckPresentAnyBC(Model,'Temp Upper Limit') 
+ 
   IF(LowerLim .AND. UpperLim) THEN
     CALL Warn('MPRGPSolver','This code cannot have both upper and lower limit at same time!')
   END IF
@@ -750,7 +754,7 @@ CONTAINS
     INTEGER :: n, nd
     TYPE(Element_t), POINTER :: Element
 !------------------------------------------------------------------------------
-    REAL(KIND=dp) :: Flux(n), Coeff(n), Ext_t(n), F,C,Ext, Weight
+    REAL(KIND=dp) :: Flux(n), Coeff(n), Ext_t(n), F,C,Ext, Weight,Lim(n)
     REAL(KIND=dp) :: Basis(nd),dBasisdx(nd,3),DetJ,LoadAtIP
     REAL(KIND=dp) :: STIFF(nd,nd), FORCE(nd), LOAD(n)
     LOGICAL :: Stat,Found
@@ -764,6 +768,16 @@ CONTAINS
 !------------------------------------------------------------------------------
     BC => GetBC()
     IF (.NOT.ASSOCIATED(BC) ) RETURN
+    IF ( ASSOCIATED(BC) ) THEN
+      IF(UpperLim) THEN
+        Lim(1:n) = GetReal(BC,'Temp Upper Limit',Found) 
+      ELSE IF(LowerLim) THEN
+        Lim(1:n) = GetReal(BC,'Temp Lower Limit',Found) 
+      END IF
+      IF(Found) THEN
+        LimVal(Solver % Variable % Perm(Element % NodeIndexes)) = Lim(1:n)
+      END IF
+    END IF
 
     dim = CoordinateSystemDimension()
 
