@@ -91,6 +91,8 @@ END SUBROUTINE my_rpcond
     REAL(KIND=dp) :: tmp_norm
     REAL(KIND=dp) :: eps_local
     TYPE(Matrix_t), POINTER :: MatA
+    REAL(KIND=dp) :: tol
+
 
     ! ---------------------------
     ! Allocate scratch vectors
@@ -112,20 +114,36 @@ END SUBROUTINE my_rpcond
       bs = 1
     END IF
 
-    ! set matrix pointer from CurrentModel like my_matvec does
-    MatA => CurrentModel % Solver % Matrix
 
     ! ---------------------------
     ! Initialization (g = A*x - b)
     ! ---------------------------
     CALL my_matvec(x, g)       ! g = A*x
-    DO i = 1, n
-      g(i) = g(i) - b(i)
-    END DO
 
-    DO i = 1, n
-      J(i) = (bs * x(i) > bs * c(i))
-    END DO
+    g = g - b
+
+    
+    ! Debug output for gradient calculation
+    write(*,*) "Debug: First few b values:", b(1:min(5,size(b)))
+    write(*,*) "Debug: First few g values after A*x:", g(1:min(5,size(g)))
+    write(*,*) "Debug: First few g values after g-b:", g(1:min(5,size(g)))
+    write(*,*) "Debug: Norm of g:", my_normfun(n, g)
+
+    tol = 1.0e-12_dp
+    IF (bs == 1) THEN
+      J = (x > c + tol) ! J is free set
+    ELSE
+      J = (x < c - tol)! J is free set
+    END IF
+
+
+
+    ! Debug output for constraint checking
+    write(*,*) "Debug: bs =", bs, "bound_type =", bound
+    write(*,*) "Debug: First few x values:", x(1:min(5,size(x)))
+    write(*,*) "Debug: First few c values:", c(1:min(5,size(c)))
+    write(*,*) "Debug: First few J values:", J(1:min(5,size(J)))
+    write(*,*) "Debug: Number of active constraints:", count(J)
 
     gf = MERGE(g, 0.0_dp, J)
 
@@ -144,15 +162,18 @@ END SUBROUTINE my_rpcond
     END IF
 
     ! estimate matrix norm ||A|| with a small power iteration
-    CALL estimate_matrix_norm(n, 10, lAl, MatA)
+    CALL estimate_matrix_norm(n, 10, lAl)
     IF (lAl <= 0.0_dp) lAl = 1.0_dp
     alpha = 1.0_dp / lAl
 
     ! reduced free gradient gr
     IF (bs == 1) THEN
-      gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
+      gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J) ! this might be wrong,
+!      gr = MIN(lAl * (x - c), gf)
+      WRITE(*,*) "gr is:", my_normfun(n, gr)
     ELSE
       gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
+!      gr = MAX(lAl * (x - c), gf)
     END IF
 
     gp = gf + gc
@@ -173,16 +194,23 @@ END SUBROUTINE my_rpcond
     ! ---------------------------
     ! Main loop
     ! ---------------------------
+    write(*,*) "Norm of gf is:", my_normfun(n, gf)
+    write(*,*) "Norm of gc is:", my_normfun(n, gc)
+    write(*,*) "Norm of gr is:", my_normfun(n, gr)
+    write(*,*) "Norm of gp is:", my_normfun(n, gp)
     DO WHILE ( my_normfun(n, gp) > epsr .AND. iters < maxit )
 
       iters = iters + 1
-      WRITE(*,*) "iteration", iters
+      !WRITE(*,*) "iteration", iters
+      !WRITE(*,*) "Norm of gp is:", my_normfun(n, gp)
 
       IF ( my_dotprodfun(n, gc, gc) <= (Gamma**2) * my_dotprodfun(n, gr, gf) ) THEN
         ! CG-like step
         CALL my_matvec(p, Ap)
         rtp = my_dotprodfun(n, z, g)
         pAp = my_dotprodfun(n, p, Ap)
+        !WRITE(*,*) "p is:", my_normfun(n, p)
+       ! WRITE(*,*) "A*p is:", my_normfun(n, Ap)
 
         IF (ABS(pAp) < eps_local) THEN
           CALL Info('my_MPRGP','p''*A*p nearly zero, stopping',Level=5)
@@ -364,10 +392,10 @@ END SUBROUTINE my_rpcond
     RETURN
   CONTAINS
     ! power-method norm estimator using A
-    SUBROUTINE estimate_matrix_norm(nloc, niter, out_norm, Aptr)
+    SUBROUTINE estimate_matrix_norm(nloc, niter, out_norm)
       INTEGER, INTENT(IN) :: nloc, niter
       REAL(KIND=dp), INTENT(OUT) :: out_norm
-      TYPE(Matrix_t), POINTER :: Aptr
+      TYPE(Matrix_t), POINTER :: A
       REAL(KIND=dp), ALLOCATABLE :: v(:), w(:)
       INTEGER :: itl, allocstat
       REAL(KIND=dp) :: normv
@@ -377,18 +405,21 @@ END SUBROUTINE my_rpcond
         CALL Fatal('estimate_matrix_norm','alloc fail')
       END IF
 
+      ! Get matrix pointer from CurrentModel like my_matvec does
+      A => CurrentModel % Solver % Matrix
+
       DO itl = 1, nloc
         v(itl) = 1.0_dp / REAL(nloc, dp)
       END DO
 
       DO itl = 1, niter
-        CALL CRS_MatrixVectorMultiply(Aptr, v, w)
+        CALL CRS_MatrixVectorMultiply(A, v, w)
         normv = my_normfun(nloc, w)
         IF (normv <= 0.0_dp) EXIT
         v = w / normv
       END DO
 
-      CALL CRS_MatrixVectorMultiply(Aptr, v, w)
+      CALL CRS_MatrixVectorMultiply(A, v, w)
       out_norm = my_normfun(nloc, w)
 
       DEALLOCATE(v, w)
@@ -400,7 +431,7 @@ END MODULE MyLinearSolver
   
 
 !------------------------------------------------------------------------------
-SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
+SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
   USE DefUtils
   USE MyLinearSolver
@@ -433,7 +464,7 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
   LowerLim = ListCheckPresentAnyBodyForce(Model,'Temp Lower Limit')
   UpperLim = ListCheckPresentAnyBodyForce(Model,'Temp Upper Limit')
   IF(LowerLim .AND. UpperLim) THEN
-    CALL Warn('AdvDiffSolver','This code cannot have both upper and lower limit at same time!')
+    CALL Warn('MPRGPSolver','This code cannot have both upper and lower limit at same time!')
   END IF
 
   IF(UpperLim .OR. LowerLim) THEN
@@ -444,6 +475,16 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
     ELSE
       LimVal = -HUGE(Norm)
     END IF
+  END IF
+
+  IF(ListGetLogical(Solver % Values,'My linear solver',Found ) ) THEN
+    OPEN(1,FILE="a0_mprgp.dat", STATUS='Unknown')
+    CALL PrintMatrix(Solver % Matrix,.FALSE.,.FALSE.)
+    CLOSE(1)
+  ELSE
+    OPEN(1,FILE="a0_default.dat", STATUS='Unknown')
+    CALL PrintMatrix(Solver % Matrix,.FALSE.,.FALSE.)
+    CLOSE(1)
   END IF
     
   ! Nonlinear iteration loop:
@@ -486,8 +527,7 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
     ! And finally, solve:
     !--------------------
   IF(ListGetLogical(Solver % Values,'My linear solver',Found ) ) THEN
-    ! Use custom solver - choose between GCR and MPRGP
-    
+
     ! Use MPRGP for bound-constrained problems
     BLOCK
       INTEGER :: n_mprgp, ncg, ne, np, iters
@@ -496,12 +536,21 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
       REAL(KIND=dp), ALLOCATABLE :: c(:)
       LOGICAL :: converged_mprgp
       REAL(KIND=dp) :: final_norm_gp
-      CHARACTER(LEN=10) :: bound_type
-      
+      CHARACTER(LEN=10) :: bound_type      
       n_mprgp = SIZE(Solver % Variable % Values)
       A => Solver % Matrix
       b => Solver % Matrix % Rhs
       x => Solver % Variable % Values
+
+      OPEN(1,FILE="a_mprgp.dat", STATUS='Unknown')
+      CALL PrintMatrix(A,.FALSE.,.FALSE.)
+      CLOSE(1) 
+      
+      ! Debug output for system assembly
+      write(*,*) "Debug: System size n_mprgp =", n_mprgp
+      write(*,*) "Debug: Matrix A associated =", ASSOCIATED(A)
+      write(*,*) "Debug: RHS b associated =", ASSOCIATED(b)
+      write(*,*) "Debug: Solution x associated =", ASSOCIATED(x)
       
       ! Prepare bound constraint vector
       ALLOCATE(c(n_mprgp))
@@ -513,15 +562,20 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
         bound_type = 'lower'
       END IF
       
+      ! Debug output
+      write(*,*) "Debug: UpperLim =", UpperLim, "LowerLim =", LowerLim
+      write(*,*) "Debug: First few LimVal values:", LimVal(1:min(5,size(LimVal)))
+      write(*,*) "Debug: First few c values:", c(1:min(5,size(c)))
+      
       CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
             bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
       
-      CALL Info('AdvDiffSolver','MPRGP finished: iters='//I2S(iters)// &
+      CALL Info('MPRGPSolver','MPRGP finished: iters='//I2S(iters)// &
                 ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
       ! Save the x
 
       IF (converged_mprgp .OR. final_norm_gp <= 1.0e-8_dp) THEN
-        CALL Info('AdvDiffSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
+        CALL Info('MPRGPSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
         EXIT   ! breaks DO iter=1,maxiter
       END IF
 
@@ -535,6 +589,9 @@ SUBROUTINE AdvDiffSolver( Model,Solver,dt,TransientSimulation )
     END BLOCK
     
   ELSE
+    OPEN(1,FILE="a_default.dat", STATUS='Unknown')
+    CALL PrintMatrix(Solver % Matrix,.FALSE.,.FALSE.)
+    CLOSE(1) 
     Norm = DefaultSolve()      
     IF( DefaultConverged() ) EXIT    
   END IF
@@ -587,7 +644,7 @@ CONTAINS
     BodyForce => GetBodyForce()
     
     IF ( ASSOCIATED(BodyForce) ) THEN
-      Load(1:n) = GetReal( BodyForce,'field source', Found )
+      Load(1:n) = GetReal( BodyForce,'Heat Source', Found )
       Found = .FALSE.
       IF(UpperLim) THEN
         Lim(1:n) = GetReal(BodyForce,'Temp Upper Limit',Found) 
@@ -617,7 +674,7 @@ CONTAINS
     !-----------------------
     IP = GaussPointsAdapt( Element )
     IF( Element % ElementIndex == 1 ) THEN
-      CALL Info('AdvDiffSolver','Integration points in 1st element: '//I2S(IP % n),Level=8)
+      CALL Info('MPRGPSolver','Integration points in 1st element: '//I2S(IP % n),Level=8)
     END IF
 
 
@@ -742,5 +799,5 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-END SUBROUTINE AdvDiffSolver
+END SUBROUTINE MPRGPSolver
 !------------------------------------------------------------------------------
