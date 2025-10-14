@@ -34,7 +34,7 @@ Heat Source = Variable Coordinate 1
 
 !  Temp Upper Limit = Variable "Coordinate 1"
 !    Real MATC "sin(4*pi*tx)"
-  Temp Upper Limit = Real 2.0
+!  Temp Upper Limit = Real 2.0
 !  Temp Lower Limit = Real -2.0
   
 
@@ -89,6 +89,7 @@ Boundary Condition 1
   Name = Sides
   Target Boundaries(2) = 2 4
   Temp = Real 0.0
+!  Temp Upper Limit = Real 0.0
 End
 
 Boundary Condition 2
@@ -101,13 +102,8 @@ End
 Boundary Condition 3
   Name = Upper
   Target Boundaries = 3
-  Temp Upper Limit = Real 1.5
+!  Temp Upper Limit = Real 1.5
 ! Temp = Real 1.5
 End
 
 RUN
-
-
-
-
-
