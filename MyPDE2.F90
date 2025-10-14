@@ -82,13 +82,14 @@ END SUBROUTINE my_rpcond
     ! Local declarations (all here)
     ! ---------------------------
     REAL(KIND=dp), ALLOCATABLE :: g(:), gf(:), gc(:), gr(:), gp(:)
-    REAL(KIND=dp), ALLOCATABLE :: z(:), p(:), Ap(:), yy(:), D(:)
+    REAL(KIND=dp), ALLOCATABLE :: z(:), p(:), Ap(:), yy(:), D(:), Agr(:)
     LOGICAL, ALLOCATABLE :: J(:)
+    LOGICAL, ALLOCATABLE :: p_mask(:)
     INTEGER :: bs
     REAL(KIND=dp) :: lAl, alpha, a_f
     INTEGER :: i, allocstat
     REAL(KIND=dp) :: rtp, pAp, acg, beta
-    REAL(KIND=dp) :: tmp_norm
+    REAL(KIND=dp) :: grg, grAgr
     REAL(KIND=dp) :: eps_local
     TYPE(Matrix_t), POINTER :: MatA
     REAL(KIND=dp) :: tol
@@ -97,7 +98,7 @@ END SUBROUTINE my_rpcond
     ! ---------------------------
     ! Allocate scratch vectors
     ! ---------------------------
-    ALLOCATE(g(n), gf(n), gc(n), gr(n), gp(n), z(n), p(n), Ap(n), yy(n), J(n), STAT=allocstat)
+    ALLOCATE(g(n), gf(n), gc(n), gr(n), gp(n), z(n), p(n), Ap(n), yy(n), J(n), Agr(n), STAT=allocstat)
     IF (allocstat /= 0) THEN
       CALL Fatal('my_MPRGP','Allocation failed for scratch vectors')
     END IF
@@ -122,29 +123,12 @@ END SUBROUTINE my_rpcond
 
     g = g - b
 
-    
-    ! Debug output for gradient calculation
-    write(*,*) "Debug: First few b values:", b(1:min(5,size(b)))
-    write(*,*) "Debug: First few g values after A*x:", g(1:min(5,size(g)))
-    write(*,*) "Debug: First few g values after g-b:", g(1:min(5,size(g)))
-    write(*,*) "Debug: Norm of g:", my_normfun(n, g)
-
     tol = 1.0e-12_dp
     IF (bs == 1) THEN
       J = (x > c + tol) ! J is free set
     ELSE
-      J = (x < c - tol)! J is free set
+      J = (x < c - tol)
     END IF
-
-
-
-    ! Debug output for constraint checking
-    write(*,*) "Debug: bs =", bs, "bound_type =", bound
-    write(*,*) "Debug: First few x values:", x(1:min(5,size(x)))
-    write(*,*) "Debug: First few c values:", c(1:min(5,size(c)))
-    write(*,*) "Debug: First few J values:", J(1:min(5,size(J)))
-    write(*,*) "Debug: Number of free DOFs:", count(J)
-
     gf = MERGE(g, 0.0_dp, J)
 
     IF (bs == 1) THEN
@@ -169,11 +153,8 @@ END SUBROUTINE my_rpcond
     ! reduced free gradient gr
     IF (bs == 1) THEN
       gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J) ! this might be wrong,
-!      gr = MIN(lAl * (x - c), gf)
-      WRITE(*,*) "gr is:", my_normfun(n, gr)
     ELSE
       gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
-!      gr = MAX(lAl * (x - c), gf)
     END IF
 
     gp = gf + gc
@@ -194,10 +175,6 @@ END SUBROUTINE my_rpcond
     ! ---------------------------
     ! Main loop
     ! ---------------------------
-    write(*,*) "Norm of gf is:", my_normfun(n, gf)
-    write(*,*) "Norm of gc is:", my_normfun(n, gc)
-    write(*,*) "Norm of gr is:", my_normfun(n, gr)
-    write(*,*) "Norm of gp is:", my_normfun(n, gp)
     DO WHILE ( my_normfun(n, gp) > epsr .AND. iters < maxit )
 
       iters = iters + 1
@@ -207,10 +184,8 @@ END SUBROUTINE my_rpcond
       IF ( my_dotprodfun(n, gc, gc) <= (Gamma**2) * my_dotprodfun(n, gr, gf) ) THEN
         ! CG-like step
         CALL my_matvec(p, Ap)
-        rtp = my_dotprodfun(n, z, g)
+        rtp = my_dotprodfun(n, z, g) ! residual * p
         pAp = my_dotprodfun(n, p, Ap)
-        !WRITE(*,*) "p is:", my_normfun(n, p)
-       ! WRITE(*,*) "A*p is:", my_normfun(n, Ap)
 
         IF (ABS(pAp) < eps_local) THEN
           CALL Info('my_MPRGP','p''*A*p nearly zero, stopping',Level=5)
@@ -253,20 +228,11 @@ END SUBROUTINE my_rpcond
           ncg = ncg + 1
         ELSE
           ! expansion step (feasible step)
-          ! TODO revise if this is correct
-          a_f = -1.0_dp
-          DO i = 1, n
-            IF ( (bs * p(i) > 0.0_dp) .AND. J(i) ) THEN
-              tmp_norm = (x(i) - c(i)) / p(i)
-              IF (a_f < 0.0_dp) THEN
-                a_f = tmp_norm
-              ELSE
-                a_f = MIN(a_f, tmp_norm)
-              END IF
-            END IF
-          END DO
+          p_mask = (bs * p > 0.0_dp) .AND. J ! indexes where p is moving towards the bound
+          a_f = MINVAL((x-c) / p,p_mask)
+          
           IF (a_f < 0.0_dp) a_f = 0.0_dp
-
+          ! halfstep
           IF (bs == 1) THEN
               x = MAX(x - a_f * p, c)
           ELSE
@@ -276,18 +242,15 @@ END SUBROUTINE my_rpcond
           J = (bs * x > bs * c)
           g = g - a_f * Ap
 
-          ! recompute preconditioned residual z
-          CALL my_rpcond(z, g, J)
-
-          ! adaptive alpha if requested
+          ! adaptive alpha
           IF (adapt) THEN
-            CALL my_matvec(gr, Ap)
-            tmp_norm = my_dotprodfun(n, gr, g)
-            pAp = my_dotprodfun(n, gr, Ap)
-            IF (ABS(pAp) < eps_local) THEN
+            CALL my_matvec(gr, Agr)
+            grg = my_dotprodfun(n, gr, g)
+            grAgr = my_dotprodfun(n, gr, Agr)
+            IF (ABS(grAgr) < eps_local) THEN
               alpha = 1.0_dp / lAl
             ELSE
-              alpha = tmp_norm / pAp
+              alpha = grg / grAgr
               IF (alpha <= 0.0_dp .OR. alpha > 1.0_dp / lAl) alpha = 1.0_dp / lAl
             END IF
           END IF
@@ -302,7 +265,7 @@ END SUBROUTINE my_rpcond
             END WHERE
           END IF
 
-          CALL my_matvec(x, g)
+          CALL my_matvec(x, g) !calculate Ax, save it in g
           g = g - b
 
           ! recompute z and p
@@ -342,14 +305,11 @@ END SUBROUTINE my_rpcond
 
         x = x - acg * gc
 
+        ! safeguard if we end up outside the bound
         IF (bs == 1) THEN
-          DO i = 1, n
-            IF (x(i) < c(i)) x(i) = c(i)
-          END DO
+          x = MAX(x, c)
         ELSE
-          DO i = 1, n
-            IF (x(i) > c(i)) x(i) = c(i)
-          END DO
+          x = MIN(x, c)
         END IF
 
         J = (bs * x > bs * c)
@@ -367,7 +327,6 @@ END SUBROUTINE my_rpcond
             gc = MIN(g, 0.0_dp)
           END WHERE
           gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
-
         ELSE
           gc = 0.0_dp
           WHERE (.NOT. J)
@@ -543,21 +502,7 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
       A => Solver % Matrix
       b => Solver % Matrix % Rhs
       x => Solver % Variable % Values
-
-      !IF(iter == 1) THEN
-      !  OPEN(1, FILE="x_mprgp_iter.dat", STATUS='Unknown')
-      !    DO i=1,SIZE(Solver % Variable % Values)
-      !      WRITE(1,*) Solver % Variable % Values(i)    
-      !    END DO
-      !    CLOSE(1)
-      !END IF
-
       
-      ! Debug output for system assembly
-      write(*,*) "Debug: System size n_mprgp =", n_mprgp
-      write(*,*) "Debug: Matrix A associated =", ASSOCIATED(A)
-      write(*,*) "Debug: RHS b associated =", ASSOCIATED(b)
-      write(*,*) "Debug: Solution x associated =", ASSOCIATED(x)
       
       ! Prepare bound constraint vector
       ALLOCATE(c(n_mprgp))
@@ -568,11 +513,6 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
         c = LimVal
         bound_type = 'lower'
       END IF
-      
-      ! Debug output
-      write(*,*) "Debug: UpperLim =", UpperLim, "LowerLim =", LowerLim
-      write(*,*) "Debug: First few LimVal values:", LimVal(1:min(5,size(LimVal)))
-      write(*,*) "Debug: First few c values:", c(1:min(5,size(c)))
       
       ! Set initial guess: u = max(0, c) for lower bounds, u = min(0, c) for upper bounds
       IF(UpperLim) THEN
