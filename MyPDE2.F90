@@ -58,7 +58,7 @@ END SUBROUTINE my_rpcond
   
 !------------------------------------------------------------------------------
   SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
-                      ncg, ne, np, iters, converged, final_norm_gp)
+                      ncg, ne, np, iters, converged, norm_gp)
     USE DefUtils
     IMPLICIT NONE
 
@@ -76,7 +76,7 @@ END SUBROUTINE my_rpcond
 
     INTEGER, INTENT(OUT) :: ncg, ne, np, iters
     LOGICAL, INTENT(OUT) :: converged
-    REAL(KIND=dp), INTENT(OUT) :: final_norm_gp
+    REAL(KIND=dp), INTENT(OUT) :: norm_gp
 
     ! ---------------------------
     ! Local declarations (all here)
@@ -341,8 +341,8 @@ END SUBROUTINE my_rpcond
 
     END DO  ! main loop
 
-    final_norm_gp = my_normfun(n, gp)
-    converged = (final_norm_gp <= epsr)
+    norm_gp = my_normfun(n, gp)
+    converged = (norm_gp <= epsr)
 
     ! cleanup
     IF (ALLOCATED(D)) DEALLOCATE(D)
@@ -496,7 +496,7 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
       REAL(KIND=dp), POINTER :: x(:), b(:)
       REAL(KIND=dp), ALLOCATABLE :: c(:)
       LOGICAL :: converged_mprgp
-      REAL(KIND=dp) :: final_norm_gp
+      REAL(KIND=dp) :: norm_gp
       CHARACTER(LEN=10) :: bound_type      
       n_mprgp = SIZE(Solver % Variable % Values)
       A => Solver % Matrix
@@ -531,7 +531,7 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
       write(*,*) "Debug: Initial guess x =", my_normfun(n_mprgp, x)
       
       CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
-            bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
+            bound_type, ncg, ne, np, iters, converged_mprgp, norm_gp)
       
       CALL Info('MPRGPSolver','MPRGP finished: iters='//I2S(iters)// &
                 ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
@@ -542,7 +542,7 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
         END DO
         CLOSE(1)
 
-      !IF (converged_mprgp .OR. final_norm_gp <= 1.0e-8_dp) THEN
+      !IF (converged_mprgp .OR. norm_gp <= 1.0e-8_dp) THEN
       !  CALL Info('MPRGPSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
       !  EXIT   ! breaks DO iter=1,maxiter
       !END IF

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # compile the custom solver
-elmerf90 -o MyPDE2.so MyPDE2.F90
+elmerf90 -o MPRGP.so MPRGP.F90
 if [ $? -eq 0 ]; then
     echo "Compilation successful!"
 else

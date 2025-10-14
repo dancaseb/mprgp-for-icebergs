@@ -1,13 +1,66 @@
-!------------------------------------------------------------------------------
-! Optimized MPRGP (Modified Projected Refined Gradient Projection) solver
-! Uses Elmer's efficient built-in functions for matrix-vector products, 
-! norms, and dot products for optimal performance.
-!------------------------------------------------------------------------------
-SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
-                    ncg, ne, np, iters, converged, final_norm_gp)
-!------------------------------------------------------------------------------
+MODULE MyLinearSolver
+
   USE DefUtils
   IMPLICIT NONE
+  
+CONTAINS
+
+  SUBROUTINE my_matvec(x,r)
+    REAL(KIND=dp) :: x(:), r(:)
+    TYPE(Matrix_t), POINTER :: A
+    A => CurrentModel % Solver % Matrix
+    CALL CRS_MatrixVectorMultiply( A,x,r )
+  END SUBROUTINE my_matvec
+    
+SUBROUTINE my_rpcond(x, r, J)
+  REAL(KIND=dp) :: x(:), r(:)
+  LOGICAL :: J(:)  ! free-set mask
+  TYPE(Matrix_t), POINTER :: A
+  LOGICAL :: Found
+  INTEGER :: i
+  
+  IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
+      == 'diagonal' ) THEN
+    A => CurrentModel % Solver % Matrix
+    WHERE (J)
+      x = r / A % Values(A % Diag)
+    ELSEWHERE
+      x = 0.0_dp
+    END WHERE
+  ELSE
+    ! No preconditioning, but still mask by free set
+    WHERE (J)
+      x = r
+    ELSEWHERE
+      x = 0.0_dp
+    END WHERE
+  END IF    
+END SUBROUTINE my_rpcond
+
+  FUNCTION my_normfun(n, b) RESULT ( bnorm ) 
+    REAL(KIND=dp) :: b(:)
+    INTEGER :: n
+    REAL(KIND=dp) :: bnorm
+    bnorm = SQRT(SUM(b(1:n)**2))
+  END FUNCTION my_normfun
+          
+  FUNCTION my_dotprodfun(n, t1, t2 ) RESULT ( beta ) 
+    INTEGER :: n
+    REAL(KIND=dp) :: t1(:), t2(:)        
+    REAL(KIND=dp) :: beta    
+    beta = SUM(t1(1:n)*t2(1:n))
+  END FUNCTION my_dotprodfun
+      
+  ! Write something similar to this routine using the above functions.
+  ! We can then embed this to the library rather easily. No need to change the variablenames
+  ! but the they should be pretty much the same. Probably have some additional vector and logical
+  ! for the upper/lower limit. 
+  
+!------------------------------------------------------------------------------
+  SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
+                      ncg, ne, np, iters, converged, norm_gp)
+    USE DefUtils
+    IMPLICIT NONE
 
     ! ---------------------------
     ! Arguments
@@ -23,27 +76,29 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
 
     INTEGER, INTENT(OUT) :: ncg, ne, np, iters
     LOGICAL, INTENT(OUT) :: converged
-    REAL(KIND=dp), INTENT(OUT) :: final_norm_gp
+    REAL(KIND=dp), INTENT(OUT) :: norm_gp
 
     ! ---------------------------
     ! Local declarations (all here)
     ! ---------------------------
     REAL(KIND=dp), ALLOCATABLE :: g(:), gf(:), gc(:), gr(:), gp(:)
-    REAL(KIND=dp), ALLOCATABLE :: z(:), p(:), Ap(:), yy(:), D(:)
+    REAL(KIND=dp), ALLOCATABLE :: z(:), p(:), Ap(:), yy(:), D(:), Agr(:)
     LOGICAL, ALLOCATABLE :: J(:)
+    LOGICAL, ALLOCATABLE :: p_mask(:)
     INTEGER :: bs
     REAL(KIND=dp) :: lAl, alpha, a_f
     INTEGER :: i, allocstat
     REAL(KIND=dp) :: rtp, pAp, acg, beta
-    REAL(KIND=dp) :: tmp_norm
+    REAL(KIND=dp) :: grg, grAgr
     REAL(KIND=dp) :: eps_local
     TYPE(Matrix_t), POINTER :: MatA
-    LOGICAL :: Found
+    REAL(KIND=dp) :: tol
+
 
     ! ---------------------------
     ! Allocate scratch vectors
     ! ---------------------------
-    ALLOCATE(g(n), gf(n), gc(n), gr(n), gp(n), z(n), p(n), Ap(n), yy(n), J(n), STAT=allocstat)
+    ALLOCATE(g(n), gf(n), gc(n), gr(n), gp(n), z(n), p(n), Ap(n), yy(n), J(n), Agr(n), STAT=allocstat)
     IF (allocstat /= 0) THEN
       CALL Fatal('my_MPRGP','Allocation failed for scratch vectors')
     END IF
@@ -60,16 +115,20 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
       bs = 1
     END IF
 
-    ! set matrix pointer from CurrentModel like my_matvec does
-    MatA => CurrentModel % Solver % Matrix
 
     ! ---------------------------
     ! Initialization (g = A*x - b)
     ! ---------------------------
-    CALL MatrixVectorMultiply(MatA, x, g)       ! g = A*x
+    CALL my_matvec(x, g)       ! g = A*x
 
     g = g - b
-    J = (bs * x > bs * c)
+
+    tol = 1.0e-12_dp
+    IF (bs == 1) THEN
+      J = (x > c + tol) ! J is free set
+    ELSE
+      J = (x < c - tol)
+    END IF
     gf = MERGE(g, 0.0_dp, J)
 
     IF (bs == 1) THEN
@@ -79,7 +138,7 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
         gc = 0.0_dp
       END WHERE
     ELSE
-      WHERE (.NOT. J)
+      WHERE (.NOT. J)  ! WHERE COMMAND FOR vECTORS
         gc = MAX(g, 0.0_dp)
       ELSEWHERE
         gc = 0.0_dp
@@ -87,41 +146,25 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
     END IF
 
     ! estimate matrix norm ||A|| with a small power iteration
-    CALL estimate_matrix_norm(n, 10, lAl, MatA)
+    CALL estimate_matrix_norm(n, 10, lAl)
     IF (lAl <= 0.0_dp) lAl = 1.0_dp
     alpha = 1.0_dp / lAl
 
     ! reduced free gradient gr
     IF (bs == 1) THEN
-      gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
+      gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J) ! this might be wrong,
     ELSE
       gr = MERGE(MAX(lAl * (x - c), gf), 0.0_dp, J)
     END IF
 
     gp = gf + gc
 
+    ! TODO - write this as a function
     ! preconditioning: z = M^{-1} * g on free set
-    ! Apply diagonal preconditioning with free set masking
-    IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
-        == 'diagonal' ) THEN
-      WHERE (J)
-        WHERE (ABS(MatA % Values(MatA % Diag)) > AEPS)
-          z = g / MatA % Values(MatA % Diag)
-        ELSEWHERE
-          z = g
-        END WHERE
-      ELSEWHERE
-        z = 0.0_dp
-      END WHERE
-    ELSE
-      ! No preconditioning, but still mask by free set
-      WHERE (J)
-        z = g
-      ELSEWHERE
-        z = 0.0_dp
-      END WHERE
-    END IF
+    CALL my_rpcond(z, g, J)
+
     p = z
+
     ! counters
     ncg = 0
     ne = 0
@@ -132,13 +175,17 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
     ! ---------------------------
     ! Main loop
     ! ---------------------------
-    DO WHILE ( ComputeNorm(CurrentModel % Solver, n, gp) > epsr .AND. iters < maxit )
+    DO WHILE ( my_normfun(n, gp) > epsr .AND. iters < maxit )
+
       iters = iters + 1
-      IF ( DOT_PRODUCT(gc(1:n), gc(1:n)) <= (Gamma**2) * DOT_PRODUCT(gr(1:n), gf(1:n)) ) THEN
+      !WRITE(*,*) "iteration", iters
+      !WRITE(*,*) "Norm of gp is:", my_normfun(n, gp)
+
+      IF ( my_dotprodfun(n, gc, gc) <= (Gamma**2) * my_dotprodfun(n, gr, gf) ) THEN
         ! CG-like step
-        CALL MatrixVectorMultiply(MatA, p, Ap)
-        rtp = DOT_PRODUCT(z(1:n), g(1:n))
-        pAp = DOT_PRODUCT(p(1:n), Ap(1:n))
+        CALL my_matvec(p, Ap)
+        rtp = my_dotprodfun(n, z, g) ! residual * p
+        pAp = my_dotprodfun(n, p, Ap)
 
         IF (ABS(pAp) < eps_local) THEN
           CALL Info('my_MPRGP','p''*A*p nearly zero, stopping',Level=5)
@@ -156,28 +203,9 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
           J = (bs * x > bs * c)
 
           ! precondition
-          ! Apply diagonal preconditioning with free set masking
-          IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
-              == 'diagonal' ) THEN
-            WHERE (J)
-              WHERE (ABS(MatA % Values(MatA % Diag)) > AEPS)
-                z = g / MatA % Values(MatA % Diag)
-              ELSEWHERE
-                z = g
-              END WHERE
-            ELSEWHERE
-              z = 0.0_dp
-            END WHERE
-          ELSE
-            ! No preconditioning, but still mask by free set
-            WHERE (J)
-              z = g
-            ELSEWHERE
-              z = 0.0_dp
-            END WHERE
-          END IF
+          CALL my_rpcond(z, g, J)
 
-          beta = DOT_PRODUCT(z(1:n), Ap(1:n)) / pAp
+          beta = my_dotprodfun(n, z, Ap) / pAp
           p = z - beta * p
 
           ! update gf,gc,gr,gp
@@ -200,20 +228,11 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
           ncg = ncg + 1
         ELSE
           ! expansion step (feasible step)
-          ! TODO revise if this is correct
-          a_f = -1.0_dp
-          DO i = 1, n
-            IF ( (bs * p(i) > 0.0_dp) .AND. J(i) ) THEN
-              tmp_norm = (x(i) - c(i)) / p(i)
-              IF (a_f < 0.0_dp) THEN
-                a_f = tmp_norm
-              ELSE
-                a_f = MIN(a_f, tmp_norm)
-              END IF
-            END IF
-          END DO
+          p_mask = (bs * p > 0.0_dp) .AND. J ! indexes where p is moving towards the bound
+          a_f = MINVAL((x-c) / p,p_mask)
+          
           IF (a_f < 0.0_dp) a_f = 0.0_dp
-
+          ! halfstep
           IF (bs == 1) THEN
               x = MAX(x - a_f * p, c)
           ELSE
@@ -223,37 +242,15 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
           J = (bs * x > bs * c)
           g = g - a_f * Ap
 
-          ! recompute preconditioned residual z
-          ! Apply diagonal preconditioning with free set masking
-          IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
-              == 'diagonal' ) THEN
-            WHERE (J)
-              WHERE (ABS(MatA % Values(MatA % Diag)) > AEPS)
-                z = g / MatA % Values(MatA % Diag)
-              ELSEWHERE
-                z = g
-              END WHERE
-            ELSEWHERE
-              z = 0.0_dp
-            END WHERE
-          ELSE
-            ! No preconditioning, but still mask by free set
-            WHERE (J)
-              z = g
-            ELSEWHERE
-              z = 0.0_dp
-            END WHERE
-          END IF
-
-          ! adaptive alpha if requested
+          ! adaptive alpha
           IF (adapt) THEN
-            CALL MatrixVectorMultiply(MatA, gr, Ap)
-            tmp_norm = DOT_PRODUCT(gr(1:n), g(1:n))
-            pAp = DOT_PRODUCT(gr(1:n), Ap(1:n))
-            IF (ABS(pAp) < eps_local) THEN
+            CALL my_matvec(gr, Agr)
+            grg = my_dotprodfun(n, gr, g)
+            grAgr = my_dotprodfun(n, gr, Agr)
+            IF (ABS(grAgr) < eps_local) THEN
               alpha = 1.0_dp / lAl
             ELSE
-              alpha = tmp_norm / pAp
+              alpha = grg / grAgr
               IF (alpha <= 0.0_dp .OR. alpha > 1.0_dp / lAl) alpha = 1.0_dp / lAl
             END IF
           END IF
@@ -268,30 +265,11 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
             END WHERE
           END IF
 
-          CALL MatrixVectorMultiply(MatA, x, g)
+          CALL my_matvec(x, g) !calculate Ax, save it in g
           g = g - b
 
           ! recompute z and p
-          ! Apply diagonal preconditioning with free set masking
-          IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
-              == 'diagonal' ) THEN
-            WHERE (J)
-              WHERE (ABS(MatA % Values(MatA % Diag)) > AEPS)
-                z = g / MatA % Values(MatA % Diag)
-              ELSEWHERE
-                z = g
-              END WHERE
-            ELSEWHERE
-              z = 0.0_dp
-            END WHERE
-          ELSE
-            ! No preconditioning, but still mask by free set
-            WHERE (J)
-              z = g
-            ELSEWHERE
-              z = 0.0_dp
-            END WHERE
-          END IF
+          CALL my_rpcond(z, g, J)
           p = z
 
           ! update gf,gc,gr,gp
@@ -314,49 +292,30 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
           gp = gf + gc
           ne = ne + 1
         END IF
+
       ELSE
         ! proportioning step
-        CALL MatrixVectorMultiply(MatA, gc, Ap)
-        pAp = DOT_PRODUCT(gc(1:n), Ap(1:n))
+        CALL my_matvec(gc, Ap)
+        pAp = my_dotprodfun(n, gc, Ap)
         IF (ABS(pAp) < eps_local) THEN
           CALL Info('my_MPRGP','denominator in proportioning nearly zero, stopping',Level=5)
           EXIT
         END IF
-        acg = DOT_PRODUCT(gc(1:n), g(1:n)) / pAp
+        acg = my_dotprodfun(n, gc, g) / pAp
+
         x = x - acg * gc
+
+        ! safeguard if we end up outside the bound
         IF (bs == 1) THEN
-          DO i = 1, n
-            IF (x(i) < c(i)) x(i) = c(i)
-          END DO
+          x = MAX(x, c)
         ELSE
-          DO i = 1, n
-            IF (x(i) > c(i)) x(i) = c(i)
-          END DO
+          x = MIN(x, c)
         END IF
 
         J = (bs * x > bs * c)
         g = g - acg * Ap
 
-        ! Apply diagonal preconditioning with free set masking
-        IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
-            == 'diagonal' ) THEN
-          WHERE (J)
-            WHERE (ABS(MatA % Values(MatA % Diag)) > AEPS)
-              z = g / MatA % Values(MatA % Diag)
-            ELSEWHERE
-              z = g
-            END WHERE
-          ELSEWHERE
-            z = 0.0_dp
-          END WHERE
-        ELSE
-          ! No preconditioning, but still mask by free set
-          WHERE (J)
-            z = g
-          ELSEWHERE
-            z = 0.0_dp
-          END WHERE
-        END IF
+        CALL my_rpcond(z, g, J)
         p = z
 
         ! update gf,gc,gr,gp
@@ -368,7 +327,6 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
             gc = MIN(g, 0.0_dp)
           END WHERE
           gr = MERGE(MIN(lAl * (x - c), gf), 0.0_dp, J)
-
         ELSE
           gc = 0.0_dp
           WHERE (.NOT. J)
@@ -380,10 +338,11 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
         gp = gf + gc
         np = np + 1
       END IF
+
     END DO  ! main loop
 
-    final_norm_gp = ComputeNorm(CurrentModel % Solver, n, gp)
-    converged = (final_norm_gp <= epsr)
+    norm_gp = my_normfun(n, gp)
+    converged = (norm_gp <= epsr)
 
     ! cleanup
     IF (ALLOCATED(D)) DEALLOCATE(D)
@@ -392,10 +351,10 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
     RETURN
   CONTAINS
     ! power-method norm estimator using A
-    SUBROUTINE estimate_matrix_norm(nloc, niter, out_norm, Aptr)
+    SUBROUTINE estimate_matrix_norm(nloc, niter, out_norm)
       INTEGER, INTENT(IN) :: nloc, niter
       REAL(KIND=dp), INTENT(OUT) :: out_norm
-      TYPE(Matrix_t), POINTER :: Aptr
+      TYPE(Matrix_t), POINTER :: A
       REAL(KIND=dp), ALLOCATABLE :: v(:), w(:)
       INTEGER :: itl, allocstat
       REAL(KIND=dp) :: normv
@@ -405,47 +364,36 @@ SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
         CALL Fatal('estimate_matrix_norm','alloc fail')
       END IF
 
+      ! Get matrix pointer from CurrentModel like my_matvec does
+      A => CurrentModel % Solver % Matrix
+
       DO itl = 1, nloc
         v(itl) = 1.0_dp / REAL(nloc, dp)
       END DO
 
       DO itl = 1, niter
-      CALL MatrixVectorMultiply(Aptr, v, w)
-      normv = ComputeNorm(CurrentModel % Solver, nloc, w)
-      IF (normv <= 0.0_dp) EXIT
-      v = w / normv
-    END DO
+        CALL CRS_MatrixVectorMultiply(A, v, w)
+        normv = my_normfun(nloc, w)
+        IF (normv <= 0.0_dp) EXIT
+        v = w / normv
+      END DO
 
-    CALL MatrixVectorMultiply(Aptr, v, w)
-    out_norm = ComputeNorm(CurrentModel % Solver, nloc, w)
+      CALL CRS_MatrixVectorMultiply(A, v, w)
+      out_norm = my_normfun(nloc, w)
 
       DEALLOCATE(v, w)
     END SUBROUTINE estimate_matrix_norm
 
   END SUBROUTINE my_MPRGP
   
+END MODULE MyLinearSolver
+  
 
 !------------------------------------------------------------------------------
-SUBROUTINE MyMPRGPSolver_init( Model,Solver,dt,TransientSimulation )
+SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
   USE DefUtils
-  IMPLICIT NONE
-!------------------------------------------------------------------------------
-  TYPE(Solver_t) :: Solver
-  TYPE(Model_t) :: Model
-  REAL(KIND=dp) :: dt
-  LOGICAL :: TransientSimulation
-!------------------------------------------------------------------------------
-  ! Initialization function - following ModelPDEevol pattern
-  CALL Info('MyMPRGPSolver_init','Initializing MPRGP solver',Level=5)
-!------------------------------------------------------------------------------
-END SUBROUTINE MyMPRGPSolver_init
-!------------------------------------------------------------------------------
-
-!------------------------------------------------------------------------------
-SUBROUTINE MyMPRGPSolver( Model,Solver,dt,TransientSimulation )
-!------------------------------------------------------------------------------
-  USE DefUtils
+  USE MyLinearSolver
   
   IMPLICIT NONE
 !------------------------------------------------------------------------------
@@ -463,6 +411,8 @@ SUBROUTINE MyMPRGPSolver( Model,Solver,dt,TransientSimulation )
   LOGICAL :: Found, UpperLim, LowerLim  
   TYPE(ValueList_t), POINTER :: Params  
   REAL(KIND=dp), ALLOCATABLE :: LimVal(:)
+  CHARACTER(LEN=50) :: filename
+  TYPE(Matrix_t), POINTER :: A
   
 !------------------------------------------------------------------------------
 
@@ -472,12 +422,14 @@ SUBROUTINE MyMPRGPSolver( Model,Solver,dt,TransientSimulation )
   maxiter = ListGetInteger( Params,'Nonlinear System Max Iterations',Found,minv=1)
   IF(.NOT. Found ) maxiter = 1
 
+
   LowerLim = ListCheckPresentAnyBodyForce(Model,'Temp Lower Limit') .OR. &
       ListCheckPresentAnyBC(Model,'Temp Lower Limit') 
   UpperLim = ListCheckPresentAnyBodyForce(Model,'Temp Upper Limit') .OR. &
       ListCheckPresentAnyBC(Model,'Temp Upper Limit') 
+ 
   IF(LowerLim .AND. UpperLim) THEN
-    CALL Warn('MyMPRGPSolver','This code cannot have both upper and lower limit at same time!')
+    CALL Warn('MPRGPSolver','This code cannot have both upper and lower limit at same time!')
   END IF
 
   IF(UpperLim .OR. LowerLim) THEN
@@ -489,79 +441,130 @@ SUBROUTINE MyMPRGPSolver( Model,Solver,dt,TransientSimulation )
       LimVal = -HUGE(Norm)
     END IF
   END IF
-  ! System assembly:
-  !----------------
-  CALL DefaultInitialize()
+
+
+
+    ! System assembly:
+    !----------------
+    CALL DefaultInitialize()
 
 1   Active = GetNOFActive()
 
-  DO t=1,Active
-    Element => GetActiveElement(t)
-    n  = GetElementNOFNodes()
-    nd = GetElementNOFDOFs()
-    nb = GetElementNOFBDOFs()
-    CALL LocalMatrix(  Element, n, nd+nb )
-  END DO
-
-  CALL DefaultFinishBulkAssembly()
-
-  Active = GetNOFBoundaryElements()
-  DO t=1,Active
-    Element => GetBoundaryElement(t)
-    IF(ActiveBoundaryElement()) THEN
+    DO t=1,Active
+      Element => GetActiveElement(t)
       n  = GetElementNOFNodes()
       nd = GetElementNOFDOFs()
-      CALL LocalMatrixBC(  Element, n, nd )
-    END IF
-  END DO
+      nb = GetElementNOFBDOFs()
+      CALL LocalMatrix(  Element, n, nd+nb )
+    END DO
 
-  IF(DefaultCutFEM()) GOTO 1
-  
-  CALL DefaultFinishBoundaryAssembly()
-  CALL DefaultFinishAssembly()
-  CALL DefaultDirichletBCs()
+    CALL DefaultFinishBulkAssembly()
 
+    Active = GetNOFBoundaryElements()
+    DO t=1,Active
+      Element => GetBoundaryElement(t)
+      IF(ActiveBoundaryElement()) THEN
+        n  = GetElementNOFNodes()
+        nd = GetElementNOFDOFs()
+        CALL LocalMatrixBC(  Element, n, nd )
+      END IF
+    END DO
+
+    IF(DefaultCutFEM()) GOTO 1
     
-  ! And finally, solve:
-  !--------------------
-  ! Use MPRGP for bound-constrained problems
-  BLOCK
-    INTEGER :: n_mprgp, ncg, ne, np, iters
-    TYPE(Matrix_t), POINTER :: A
-    REAL(KIND=dp), POINTER :: x(:), b(:)
-    REAL(KIND=dp), ALLOCATABLE :: c(:)
-    LOGICAL :: converged_mprgp
-    REAL(KIND=dp) :: final_norm_gp
-    CHARACTER(LEN=10) :: bound_type
-    
-    n_mprgp = SIZE(Solver % Variable % Values)
+    CALL DefaultFinishBoundaryAssembly()
+    CALL DefaultFinishAssembly()
+    CALL DefaultDirichletBCs()
+
     A => Solver % Matrix
-    b => Solver % Matrix % Rhs
-    x => Solver % Variable % Values
-    
-    ! Prepare bound constraint vector
-    ALLOCATE(c(n_mprgp))
-    IF(UpperLim) THEN
-      c = LimVal
-      bound_type = 'upper'
-    ELSE
-      c = LimVal
-      bound_type = 'lower'
-    END IF
-    
-    CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
-          bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
-    
-    CALL Info('MyMPRGPSolver','MPRGP finished: iters='//I2S(iters)// &
-              ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
 
-    IF (converged_mprgp .OR. final_norm_gp <= 1.0e-8_dp) THEN
-      CALL Info('MyMPRGPSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
-    END IF
+    WRITE(filename, '(A,I0,A)') 'a_mprgp_iter.dat'
+    OPEN(1,FILE=TRIM(filename), STATUS='Unknown')
+    CALL PrintMatrix(A,.FALSE.,.FALSE.)
+    CLOSE(1)
 
-    DEALLOCATE(c)
-  END BLOCK
+    
+    
 
+    ! And finally, solve:
+    !--------------------
+
+    ! Use MPRGP for bound-constrained problems
+    BLOCK
+      INTEGER :: n_mprgp, ncg, ne, np, iters
+      TYPE(Matrix_t), POINTER :: A
+      REAL(KIND=dp), POINTER :: x(:), b(:)
+      REAL(KIND=dp), ALLOCATABLE :: c(:)
+      LOGICAL :: converged_mprgp
+      REAL(KIND=dp) :: norm_gp
+      CHARACTER(LEN=10) :: bound_type      
+      n_mprgp = SIZE(Solver % Variable % Values)
+      A => Solver % Matrix
+      b => Solver % Matrix % Rhs
+      x => Solver % Variable % Values
+      
+      
+      ! Prepare bound constraint vector
+      ALLOCATE(c(n_mprgp))
+      IF(UpperLim) THEN
+        c = LimVal
+        bound_type = 'upper'
+      ELSE
+        c = LimVal
+        bound_type = 'lower'
+      END IF
+      
+      ! Set initial guess: u = max(0, c) for lower bounds, u = min(0, c) for upper bounds
+      IF(UpperLim) THEN
+        ! For upper bounds: u = min(0, c) - start below the upper bound
+        x = MIN(0.0_dp, c)
+        write(*,*) "Debug: Initial guess x for upper bounds"
+      ELSE IF(LowerLim) THEN
+        ! For lower bounds: u = max(0, c) - start above the lower bound  
+        x = MAX(0.0_dp, c)
+        write(*,*) "Debug: Initial guess x for lower bounds"
+      ELSE
+        ! No bounds, keep default (zeros)
+        x = 0.0_dp
+        write(*,*) "Debug: Initial guess x for no bounds"
+      END IF
+      write(*,*) "Debug: Initial guess x =", my_normfun(n_mprgp, x)
+      
+      CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
+            bound_type, ncg, ne, np, iters, converged_mprgp, norm_gp)
+      
+      CALL Info('MPRGPSolver','MPRGP finished: iters='//I2S(iters)// &
+                ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
+      ! Save the x
+      OPEN(1, FILE="x_mprgp.dat", STATUS='Unknown')
+        DO i=1,SIZE(Solver % Variable % Values)
+          WRITE(1,*) Solver % Variable % Values(i)    
+        END DO
+        CLOSE(1)
+
+      !IF (converged_mprgp .OR. norm_gp <= 1.0e-8_dp) THEN
+      !  CALL Info('MPRGPSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
+      !  EXIT   ! breaks DO iter=1,maxiter
+      !END IF
+
+      OPEN(1,FILE="x_mprgp.dat", STATUS='Unknown')
+      DO i=1,SIZE(x)
+        WRITE(1,*) x(i)    
+      END DO
+      CLOSE(1)
+
+      DEALLOCATE(c)
+    END BLOCK
+
+  ! Save the limit
+  IF(UpperLim .OR. LowerLim) THEN
+    OPEN(1,FILE="lim.dat", STATUS='Unknown')
+    DO i=1,SIZE(LimVal)
+      WRITE(1,*) LimVal(i)    
+    END DO
+    CLOSE(1)
+  END IF
+    
   CALL DefaultFinish()
   
 CONTAINS
@@ -629,7 +632,7 @@ CONTAINS
     !-----------------------
     IP = GaussPointsAdapt( Element )
     IF( Element % ElementIndex == 1 ) THEN
-      CALL Info('MyMPRGPSolver','Integration points in 1st element: '//I2S(IP % n),Level=8)
+      CALL Info('MPRGPSolver','Integration points in 1st element: '//I2S(IP % n),Level=8)
     END IF
 
 
@@ -705,7 +708,6 @@ CONTAINS
 !------------------------------------------------------------------------------
     BC => GetBC()
     IF (.NOT.ASSOCIATED(BC) ) RETURN
-
     IF ( ASSOCIATED(BC) ) THEN
       IF(UpperLim) THEN
         Lim(1:n) = GetReal(BC,'Temp Upper Limit',Found) 
@@ -717,7 +719,6 @@ CONTAINS
       END IF
     END IF
 
-    
     dim = CoordinateSystemDimension()
 
     CALL GetElementNodes( Nodes )
@@ -766,5 +767,5 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-END SUBROUTINE MyMPRGPSolver
+END SUBROUTINE MPRGPSolver
 !------------------------------------------------------------------------------

@@ -49,7 +49,7 @@ End
 Solver 1
   Equation = ModelPDE
   Variable = Temp
-  Procedure = "MyPDE2" "MPRGPSolver"
+  Procedure = "MPRGP" "MPRGPSolver"
   My linear solver = Logical True
 
 
