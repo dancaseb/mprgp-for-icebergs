@@ -18,21 +18,15 @@ SUBROUTINE my_rpcond(x, r, J)
   TYPE(Matrix_t), POINTER :: A
   LOGICAL :: Found
   INTEGER :: i
-  
   IF( ListGetString( CurrentModel % Solver % Values,'Linear System Preconditioning', Found ) &
       == 'diagonal' ) THEN
     A => CurrentModel % Solver % Matrix
     WHERE (J)
       x = r / A % Values(A % Diag)
-    ELSEWHERE
-      x = 0.0_dp
     END WHERE
   ELSE
-    ! No preconditioning, but still mask by free set
     WHERE (J)
       x = r
-    ELSEWHERE
-      x = 0.0_dp
     END WHERE
   END IF    
 END SUBROUTINE my_rpcond
@@ -162,6 +156,9 @@ END SUBROUTINE my_rpcond
     ! TODO - write this as a function
     ! preconditioning: z = M^{-1} * g on free set
     CALL my_rpcond(z, g, J)
+    WHERE (.NOT. J)
+      z = 0.0_dp
+    END WHERE
 
     p = z
 
@@ -204,6 +201,9 @@ END SUBROUTINE my_rpcond
 
           ! precondition
           CALL my_rpcond(z, g, J)
+          WHERE (.NOT. J)
+            z = 0.0_dp
+          END WHERE
 
           beta = my_dotprodfun(n, z, Ap) / pAp
           p = z - beta * p
@@ -270,6 +270,9 @@ END SUBROUTINE my_rpcond
 
           ! recompute z and p
           CALL my_rpcond(z, g, J)
+          WHERE (.NOT. J)
+            z = 0.0_dp
+          END WHERE
           p = z
 
           ! update gf,gc,gr,gp
@@ -316,6 +319,9 @@ END SUBROUTINE my_rpcond
         g = g - acg * Ap
 
         CALL my_rpcond(z, g, J)
+        WHERE (.NOT. J)
+          z = 0.0_dp
+        END WHERE
         p = z
 
         ! update gf,gc,gr,gp
