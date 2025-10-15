@@ -28,7 +28,7 @@ SUBROUTINE my_rpcond(x, r, J)
     WHERE (J)
       x = r
     END WHERE
-  END IF    
+  END IF
 END SUBROUTINE my_rpcond
 
   FUNCTION my_normfun(n, b) RESULT ( bnorm ) 
@@ -52,7 +52,7 @@ END SUBROUTINE my_rpcond
   
 !------------------------------------------------------------------------------
   SUBROUTINE my_MPRGP(n, x, b, c, epsr, maxit, Gamma, adapt, bound, &
-                      ncg, ne, np, iters, converged, norm_gp)
+                      ncg, ne, np, iters, converged, final_norm_gp)
     USE DefUtils
     IMPLICIT NONE
 
@@ -70,7 +70,7 @@ END SUBROUTINE my_rpcond
 
     INTEGER, INTENT(OUT) :: ncg, ne, np, iters
     LOGICAL, INTENT(OUT) :: converged
-    REAL(KIND=dp), INTENT(OUT) :: norm_gp
+    REAL(KIND=dp), INTENT(OUT) :: final_norm_gp
 
     ! ---------------------------
     ! Local declarations (all here)
@@ -175,8 +175,6 @@ END SUBROUTINE my_rpcond
     DO WHILE ( my_normfun(n, gp) > epsr .AND. iters < maxit )
 
       iters = iters + 1
-      !WRITE(*,*) "iteration", iters
-      !WRITE(*,*) "Norm of gp is:", my_normfun(n, gp)
 
       IF ( my_dotprodfun(n, gc, gc) <= (Gamma**2) * my_dotprodfun(n, gr, gf) ) THEN
         ! CG-like step
@@ -347,8 +345,8 @@ END SUBROUTINE my_rpcond
 
     END DO  ! main loop
 
-    norm_gp = my_normfun(n, gp)
-    converged = (norm_gp <= epsr)
+    final_norm_gp = my_normfun(n, gp)
+    converged = (final_norm_gp <= epsr)
 
     ! cleanup
     IF (ALLOCATED(D)) DEALLOCATE(D)
@@ -394,7 +392,6 @@ END SUBROUTINE my_rpcond
   
 END MODULE MyLinearSolver
   
-
 !------------------------------------------------------------------------------
 SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
@@ -448,8 +445,6 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
     END IF
   END IF
 
-
-
     ! System assembly:
     !----------------
     CALL DefaultInitialize()
@@ -489,9 +484,6 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
     CALL PrintMatrix(A,.FALSE.,.FALSE.)
     CLOSE(1)
 
-    
-    
-
     ! And finally, solve:
     !--------------------
 
@@ -502,7 +494,7 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
       REAL(KIND=dp), POINTER :: x(:), b(:)
       REAL(KIND=dp), ALLOCATABLE :: c(:)
       LOGICAL :: converged_mprgp
-      REAL(KIND=dp) :: norm_gp
+      REAL(KIND=dp) :: final_norm_gp
       CHARACTER(LEN=10) :: bound_type      
       n_mprgp = SIZE(Solver % Variable % Values)
       A => Solver % Matrix
@@ -520,57 +512,23 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
         bound_type = 'lower'
       END IF
       
-      ! Set initial guess: u = max(0, c) for lower bounds, u = min(0, c) for upper bounds
+      ! Set initial guess: x = max(0, c) for lower bounds, x = min(0, c) for upper bounds
       IF(UpperLim) THEN
-        ! For upper bounds: u = min(0, c) - start below the upper bound
         x = MIN(0.0_dp, c)
-        write(*,*) "Debug: Initial guess x for upper bounds"
       ELSE IF(LowerLim) THEN
-        ! For lower bounds: u = max(0, c) - start above the lower bound  
         x = MAX(0.0_dp, c)
-        write(*,*) "Debug: Initial guess x for lower bounds"
       ELSE
-        ! No bounds, keep default (zeros)
         x = 0.0_dp
-        write(*,*) "Debug: Initial guess x for no bounds"
       END IF
-      write(*,*) "Debug: Initial guess x =", my_normfun(n_mprgp, x)
       
       CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
-            bound_type, ncg, ne, np, iters, converged_mprgp, norm_gp)
+            bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
       
       CALL Info('MPRGPSolver','MPRGP finished: iters='//I2S(iters)// &
                 ', ncg='//I2S(ncg)//', ne='//I2S(ne)//', np='//I2S(np), Level=5)
-      ! Save the x
-      OPEN(1, FILE="x_mprgp.dat", STATUS='Unknown')
-        DO i=1,SIZE(Solver % Variable % Values)
-          WRITE(1,*) Solver % Variable % Values(i)    
-        END DO
-        CLOSE(1)
-
-      !IF (converged_mprgp .OR. norm_gp <= 1.0e-8_dp) THEN
-      !  CALL Info('MPRGPSolver','Nonlinear solve: MPRGP converged, exiting outer loop', Level=5)
-      !  EXIT   ! breaks DO iter=1,maxiter
-      !END IF
-
-      OPEN(1,FILE="x_mprgp.dat", STATUS='Unknown')
-      DO i=1,SIZE(x)
-        WRITE(1,*) x(i)    
-      END DO
-      CLOSE(1)
 
       DEALLOCATE(c)
-    END BLOCK
-
-  ! Save the limit
-  IF(UpperLim .OR. LowerLim) THEN
-    OPEN(1,FILE="lim.dat", STATUS='Unknown')
-    DO i=1,SIZE(LimVal)
-      WRITE(1,*) LimVal(i)    
-    END DO
-    CLOSE(1)
-  END IF
-    
+    END BLOCK    
   CALL DefaultFinish()
   
 CONTAINS
