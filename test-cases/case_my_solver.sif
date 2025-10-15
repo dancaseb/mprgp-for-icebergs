@@ -100,7 +100,7 @@ End
 Boundary Condition 3
   Name = Upper
   Target Boundaries = 3
-!  Temp Upper Limit = Real 1.5
+  Temp Upper Limit = Real 1.5
 !  Temp = Real 1.5
 End
 
