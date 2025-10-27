@@ -114,8 +114,11 @@ END SUBROUTINE my_rpcond
     ! Initialization (g = A*x - b)
     ! ---------------------------
     CALL my_matvec(x, g)       ! g = A*x
+    WRITE(*,'(A,E15.8)') 'MPRGP: ||g|| = ', my_normfun(n, g)
 
     g = g - b
+    WRITE(*,'(A,E15.8)') 'MPRGP: ||b|| = ', my_normfun(n, b)
+    WRITE(*,'(A,E15.8)') 'MPRGP: ||g|| = ', my_normfun(n, g)
 
     tol = 1.0e-12_dp
     IF (bs == 1) THEN
@@ -152,6 +155,7 @@ END SUBROUTINE my_rpcond
     END IF
 
     gp = gf + gc
+!    WRITE(*,'(A,E15.8)') ' before precond MPRGP: ||g|| = ', my_normfun(n, g)
 
     ! TODO - write this as a function
     ! preconditioning: z = M^{-1} * g on free set
@@ -159,6 +163,9 @@ END SUBROUTINE my_rpcond
     WHERE (.NOT. J)
       z = 0.0_dp
     END WHERE
+
+!    WRITE(*,'(A,E15.8)') ' after precond MPRGP: ||g|| = ', my_normfun(n, g)
+
 
     p = z
 
@@ -169,10 +176,58 @@ END SUBROUTINE my_rpcond
     iters = 0
     converged = .FALSE.
 
+          ! Debug initial state
+!      WRITE(*,'(A)') 'MPRGP: Initial state debug'
+!      WRITE(*,'(A,E15.8)') 'MPRGP: Initial residual norm = ', my_normfun(n, gp)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: Matrix norm estimate = ', lAl
+!      WRITE(*,'(A,I0)') 'MPRGP: Free variables = ', COUNT(J)
+!      WRITE(*,'(A,I0)') 'MPRGP: Constrained variables = ', COUNT(.NOT. J)
+      
+!      ! Debug vector norms
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||x|| = ', my_normfun(n, x)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||c|| = ', my_normfun(n, c)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||g|| = ', my_normfun(n, g)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||gf|| = ', my_normfun(n, gf)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||gc|| = ', my_normfun(n, gc)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||gr|| = ', my_normfun(n, gr)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||z|| = ', my_normfun(n, z)
+!      WRITE(*,'(A,E15.8)') 'MPRGP: ||p|| = ', my_normfun(n, p)
+!      
+!      ! Debug initial guess x
+!      WRITE(*,'(A)') 'MPRGP: Initial guess x (first 5 elements):'
+!      DO i = 1, MIN(n, 5)
+!        WRITE(*,'(I0,A,E15.8)') i, ': ', x(i)
+!      END DO
+!      
+!      ! Debug limiter c
+!      WRITE(*,'(A)') 'MPRGP: Limiter c (first 5 elements):'
+!      DO i = 1, MIN(n, 5)
+!        WRITE(*,'(I0,A,E15.8)') i, ': ', c(i)
+!      END DO
+!      
+!      ! Debug initial gradient g
+!      WRITE(*,'(A)') 'MPRGP: Initial gradient g (first 5 elements):'
+!      DO i = 1, MIN(n, 5)
+!        WRITE(*,'(I0,A,E15.8)') i, ': ', g(i)
+!      END DO
+!      
+!      ! Debug free gradient gf
+!      WRITE(*,'(A)') 'MPRGP: Free gradient gf (first 5 elements):'
+!      DO i = 1, MIN(n, 5)
+!        WRITE(*,'(I0,A,E15.8)') i, ': ', gf(i)
+!      END DO
+!      
+!      ! Debug constrained gradient gc
+!      WRITE(*,'(A)') 'MPRGP: Constrained gradient gc (first 5 elements):'
+!      DO i = 1, MIN(n, 5)
+!        WRITE(*,'(I0,A,E15.8)') i, ': ', gc(i)
+!      END DO
+
     ! ---------------------------
     ! Main loop
     ! ---------------------------
     DO WHILE ( my_normfun(n, gp) > epsr .AND. iters < maxit )
+      WRITE(*,'(A,I0,A,E15.8)') 'MPRGP: Iteration ', iters, ' - Residual norm = ', my_normfun(n, gp)
 
       iters = iters + 1
 
@@ -181,13 +236,88 @@ END SUBROUTINE my_rpcond
         CALL my_matvec(p, Ap)
         rtp = my_dotprodfun(n, z, g) ! residual * p
         pAp = my_dotprodfun(n, p, Ap)
+        WRITE(*,'(A,E15.8)') 'MPRGP: pAp = ', pAp
 
         IF (ABS(pAp) < eps_local) THEN
-          CALL Info('my_MPRGP','p''*A*p nearly zero, stopping',Level=5)
-          EXIT
+
+            WRITE(*,'(A,I0,A,E15.8)') 'MPRGP: Iteration ', iters, ' - Residual norm = ', my_normfun(n, gp)
+            WRITE(*,'(A,I0,A,E15.8)') 'MPRGP: Iteration ', iters, ' - pAp nearly zero: ', pAp
+            WRITE(*,'(A,E15.8,A,E15.8)') 'MPRGP: |pAp| = ', ABS(pAp), ', eps = ', eps_local
+            WRITE(*,'(A,E15.8,A,E15.8)') 'MPRGP: ||p|| = ', my_normfun(n, p), ', ||Ap|| = ', my_normfun(n, Ap)
+            WRITE(*,'(A,E15.8)') 'MPRGP: Residual norm = ', my_normfun(n, gp)
+            
+            ! Debug vector norms at failure
+!            WRITE(*,'(A)') 'MPRGP: Vector norms at failure:'
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||g|| = ', my_normfun(n, g)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||gf|| = ', my_normfun(n, gf)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||gc|| = ', my_normfun(n, gc)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||gr|| = ', my_normfun(n, gr)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||z|| = ', my_normfun(n, z)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||p|| = ', my_normfun(n, p)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||Ap|| = ', my_normfun(n, Ap)
+!            
+!            ! Debug gradients at failure
+!            WRITE(*,'(A)') 'MPRGP: Gradients at failure (first 5 elements):'
+!            WRITE(*,'(A)') 'MPRGP: g (total gradient):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', g(i)
+!            END DO
+!            WRITE(*,'(A)') 'MPRGP: gf (free gradient):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', gf(i)
+!            END DO
+!            WRITE(*,'(A)') 'MPRGP: gc (constrained gradient):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', gc(i)
+!            END DO
+!            WRITE(*,'(A)') 'MPRGP: gr (reduced gradient):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', gr(i)
+!            END DO
+!            
+!            ! Debug search direction and Ap
+!            WRITE(*,'(A)') 'MPRGP: Search direction p (first 5 elements):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', p(i)
+!            END DO
+!            WRITE(*,'(A)') 'MPRGP: Ap vector (first 5 elements):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', Ap(i)
+!            END DO
+
+            IF (bs == 1) THEN
+              J = (x > c + tol) ! J is free set
+            ELSE
+              J = (x < c - tol)
+            END IF
+            gf = MERGE(g, 0.0_dp, J)
+
+            IF (bs == 1) THEN
+              WHERE (.NOT. J)
+                gc = MIN(g, 0.0_dp)
+              ELSEWHERE
+                gc = 0.0_dp
+              END WHERE
+            ELSE
+              WHERE (.NOT. J)  ! WHERE COMMAND FOR vECTORS
+                gc = MAX(g, 0.0_dp)
+              ELSEWHERE
+                gc = 0.0_dp
+              END WHERE
+            END IF
+
+            gp = gf + gc 
+            WRITE(*,'(A,E15.8)') 'MPRGP: Residual norm after recomputing gradients in case of pAp zero = ', my_normfun(n, gp) 
+            IF (my_normfun(n, gp) <= epsr) THEN
+              CALL INFO('itermethod_mprgp','converged: gp small after pAp nearly zero')
+              EXIT
+            END IF
+          CALL Info('my_MPRGP','p''*A*p nearly zero, stopping in CG step',Level=5)
+!          EXIT
         END IF
 
         acg = rtp / pAp
+        WRITE(*,'(A,E15.8)') 'MPRGP: acg = ', acg
         yy = x - acg * p
 
 
@@ -299,10 +429,33 @@ END SUBROUTINE my_rpcond
         CALL my_matvec(gc, Ap)
         pAp = my_dotprodfun(n, gc, Ap)
         IF (ABS(pAp) < eps_local) THEN
-          CALL Info('my_MPRGP','denominator in proportioning nearly zero, stopping',Level=5)
-          EXIT
+!              WRITE(*,'(A,I0,A,E15.8)') 'MPRGP: Iteration ', iters, ' - Proportioning pAp nearly zero: ', pAp
+!            WRITE(*,'(A,E15.8,A,E15.8)') 'MPRGP: |pAp| = ', ABS(pAp), ', eps = ', eps_local
+!            WRITE(*,'(A,E15.8,A,E15.8)') 'MPRGP: ||gc|| = ', my_normfun(n, gc), ', ||Ap|| = ', my_normfun(n, Ap)
+!            
+!            ! Debug vector norms at proportioning failure
+!            WRITE(*,'(A)') 'MPRGP: Vector norms at proportioning failure:'
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||gc|| = ', my_normfun(n, gc)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||Ap|| = ', my_normfun(n, Ap)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||g|| = ', my_normfun(n, g)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||gf|| = ', my_normfun(n, gf)
+!            WRITE(*,'(A,E15.8)') 'MPRGP: ||gr|| = ', my_normfun(n, gr)
+!            
+!            ! Debug constrained gradient at failure
+!            WRITE(*,'(A)') 'MPRGP: Constrained gradient gc at failure (first 5 elements):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', gc(i)
+!            END DO
+!            WRITE(*,'(A)') 'MPRGP: Ap vector at failure (first 5 elements):'
+!            DO i = 1, MIN(n, 5)
+!              WRITE(*,'(I0,A,E15.8)') i, ': ', Ap(i)
+!            END DO
+            
+          CALL Info('my_MPRGP','denominator in proportioning nearly zero in proportioning, stopping',Level=5)
+ !         EXIT
         END IF
         acg = my_dotprodfun(n, gc, g) / pAp
+        WRITE(*,'(A,E15.8)') 'MPRGP: acg (proportioning) = ', acg
 
         x = x - acg * gc
 
@@ -346,6 +499,8 @@ END SUBROUTINE my_rpcond
     END DO  ! main loop
 
     final_norm_gp = my_normfun(n, gp)
+    WRITE(*,'(A,E15.8)') 'MPRGP: converged with a final norm of', final_norm_gp
+
     converged = (final_norm_gp <= epsr)
 
     ! cleanup
@@ -500,8 +655,6 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
       A => Solver % Matrix
       b => Solver % Matrix % Rhs
       x => Solver % Variable % Values
-      
-      
       ! Prepare bound constraint vector
       ALLOCATE(c(n_mprgp))
       IF(UpperLim) THEN
@@ -521,7 +674,7 @@ SUBROUTINE MPRGPSolver( Model,Solver,dt,TransientSimulation )
         x = 0.0_dp
       END IF
       
-      CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 1.0_dp, .FALSE., &
+      CALL my_MPRGP(n_mprgp, x, b, c, 1.0e-8_dp, 100000, 2.0_dp, .FALSE., &
             bound_type, ncg, ne, np, iters, converged_mprgp, final_norm_gp)
       
       CALL Info('MPRGPSolver','MPRGP finished: iters='//I2S(iters)// &

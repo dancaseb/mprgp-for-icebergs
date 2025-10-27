@@ -25,7 +25,6 @@ end
 
 
 
-% c = -0.5*ones(n,1);
 c = load('../lim.dat');
 
 
@@ -38,21 +37,24 @@ c = load('../lim.dat');
 % Qpmprgp; x = u;
 
 
-opts.precond = 'none';    % 'none', 'jacobi', or 'ichol'
+opts.precond = 'none';
 opts.epsr = 1e-8;
 opts.maxit = 500;
 opts.Gamma = 1.0;
 opts.verbose = true;
 opts.adapt = true;
-opts.bound = 'upper';  % 'lower' or 'upper'
+opts.bound = 'lower';  % 'lower' or 'upper'
+% [u, info] = mprgp_solver(A, b, c, opts);
 [u, info] = mprgp_solver(A, b, c, opts);
 x = u;
 
 
 
-data = csvread('output.csv', 1, 0);  % skip 1 header row
+data = csvread('output_default_solver.csv', 1, 0);  % skip 1 header row
 x_elmer = data(:,1);   % pick the value column
-% x_direct = A \ b;
+disp(sprintf('x_elmer = %.3e', x_elmer(1:10)));
+
+disp(sprintf('x_my_solver = %.3e', x(1:10)));
 
 abs_err=norm(x - x_elmer);
 rel_err=abs_err / norm(x_elmer);

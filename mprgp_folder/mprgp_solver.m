@@ -84,6 +84,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
     % initialization
     g = A * u - b; % gradient (Cost: matvec operation)
     J = (bs .* u > bs .* c); % logical free-set indicator
+
     gf = J .* g; % free gradient
 
     if bs == 1
@@ -112,8 +113,8 @@ function [u, info] = mprgp_solver(A, b, c, opts)
     converged = false;
 
     % main MPRGP loop
-    while norm(gp) > opts.epsr && iters < opts.maxit
-        disp(norm(gp));
+    while norm(gp) > opts.epsr  && iters < opts.maxit
+        fprintf('Iteration %d: ||gp|| = %.6e\n', iters, norm(gp));
         iters = iters + 1;
 
         if (gc' * gc) <= (opts.Gamma^2) * (gr' * gf)
@@ -124,7 +125,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
             if abs(pAp) < eps
                 % direction degenerate; break to avoid division by zero
                 if opts.verbose, warning('p''*A*p nearly zero, stopping'); end
-                break;
+                % break;
             end
 
             acg = rtp / pAp; % CG step size
@@ -221,7 +222,7 @@ function [u, info] = mprgp_solver(A, b, c, opts)
 
             if abs(denom) < eps
                 if opts.verbose, warning('denominator in proportioning nearly zero, stopping'); end
-                break;
+                % break;
             end
 
             acg = (gc' * g) / denom;
@@ -259,6 +260,8 @@ function [u, info] = mprgp_solver(A, b, c, opts)
         end
 
     end
+    fprintf('||gp|| = %.6e\n', norm(gp));
+
 
     info.ncgs = ncg;
     info.nes = ne;

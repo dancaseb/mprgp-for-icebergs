@@ -20,21 +20,22 @@ fi
 # Step 1: Run ElmerSolver with different solvers
 rm -f mprgp/output_default_solver.csv
 rm -f mprgp/output_my_solver.csv
-rm -f square/case_default_solver_t0001.vtu
-rm -f square/case_my_solver_t0001.vtu
+rm -f square1/case_default_solver_t0001.vtu
+rm -f square1/case_my_solver_t0001.vtu
 
 ElmerSolver test-cases/case.sif
 ElmerSolver test-cases/case_my_solver.sif
 
-cd mprgp
+cd mprgp_folder
 
 # Step 2: Extract data from ParaView
-pvpython ./save_paraview_data.py  "../square/case_default_solver_t0001.vtu" "output_default_solver.csv"
-pvpython ./save_paraview_data.py  "../square/case_my_solver_t0001.vtu" "output_my_solver.csv"
+pvpython ./save_paraview_data.py  "../square1/case_default_solver_t0001.vtu" "output_default_solver.csv"
+pvpython ./save_paraview_data.py  "../square1/case_my_solver_t0001.vtu" "output_my_solver.csv"
 
 
 # Step 3: Compare results using Octave
-octave ./compare_x.m
+#unset LD_LIBRARY_PATH
+#octave ./compare_x.m
 
 
 

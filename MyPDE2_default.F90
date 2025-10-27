@@ -89,22 +89,13 @@ SUBROUTINE DefaultSolver( Model,Solver,dt,TransientSimulation )
     CALL DefaultFinishBoundaryAssembly()
     CALL DefaultFinishAssembly()
     CALL DefaultDirichletBCs()
+    ! Save the linear system for MPRGP
     IF(iter == 1) THEN
-    WRITE(filename, '(A,I0,A)') 'a_default_iter', iter, '.dat'
+    WRITE(filename, '(A,I0,A)') 'a', iter, '.dat'
       OPEN(1,FILE=TRIM(filename), STATUS='Unknown')
       CALL PrintMatrix(Solver % Matrix,.FALSE.,.FALSE.)
       CLOSE(1)
     END IF
-
-    IF(iter == 2) THEN
-      OPEN(1, FILE="x_default.dat", STATUS='Unknown')
-      DO i=1,SIZE(Solver % Variable % Values)
-        WRITE(1,*) Solver % Variable % Values(i)    
-      END DO
-      CLOSE(1)
-
-    END IF
-
    
     Norm = DefaultSolve()      
     IF( DefaultConverged() ) EXIT    
@@ -114,9 +105,9 @@ SUBROUTINE DefaultSolver( Model,Solver,dt,TransientSimulation )
 
   ! Save the limit
   IF(UpperLim .OR. LowerLim) THEN
-    OPEN(1,FILE="lim.dat", STATUS='Unknown')
+    OPEN(1,FILE="c.dat", STATUS='Unknown')
     DO i=1,SIZE(LimVal)
-      WRITE(1,*) LimVal(i)    
+      WRITE(1,'(I0,1X,F24.12)') i, LimVal(i)
     END DO
     CLOSE(1)
   END IF
@@ -265,7 +256,7 @@ CONTAINS
 !------------------------------------------------------------------------------
     BC => GetBC()
     IF (.NOT.ASSOCIATED(BC) ) RETURN
-        IF ( ASSOCIATED(BC) ) THEN
+    IF ( ASSOCIATED(BC) ) THEN
       IF(UpperLim) THEN
         Lim(1:n) = GetReal(BC,'Temp Upper Limit',Found) 
       ELSE IF(LowerLim) THEN
