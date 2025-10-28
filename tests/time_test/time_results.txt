@@ -1,0 +1,4 @@
+=== MPRGP_ELMER ===
+SOLVER TOTAL TIME(CPU,REAL):         0.32        0.90
+=== ELMER ===
+SOLVER TOTAL TIME(CPU,REAL):         1.72        2.23
